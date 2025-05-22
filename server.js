@@ -1,3 +1,14 @@
+/**
+ * ===================== IMPORTANT =====================
+ * Do NOT run `npm start` in the client folder when using this backend server.
+ * Only run `npm run build` in the client folder to generate the React build.
+ * Then start the backend (node server.js or npm start in root).
+ * The backend will serve the frontend at http://localhost:5000.
+ * If you want to use the React dev server (for hot reload),
+ * run it on port 3000 and set up a proxy in client/package.json.
+ * =====================================================
+ */
+
 require('dotenv').config();
 const express = require('express');
 const http = require('http');
@@ -19,7 +30,7 @@ const io = new Server(server, {
 });
 
 // MongoDB connection
-mongoose.connect('mongodb://localhost:27017/messenger', { useNewUrlParser: true, useUnifiedTopology: true })
+mongoose.connect(process.env.MONGO_URI || 'mongodb://localhost:27017/messenger', { useNewUrlParser: true, useUnifiedTopology: true })
   .then(() => console.log('MongoDB connected'))
   .catch(err => console.log(err));
 
@@ -259,9 +270,15 @@ io.on('connection', (socket) => {
 });
 
 // Serve React static files (after all API routes)
-app.use(express.static(path.join(__dirname, 'client', 'build')));
+const clientBuildPath = path.join(__dirname, 'client', 'build');
+app.use(express.static(clientBuildPath));
 app.get(/^\/((?!api|uploads).)*$/, (req, res) => {
-  res.sendFile(path.join(__dirname, 'client', 'build', 'index.html'));
+  const indexPath = path.join(clientBuildPath, 'index.html');
+  if (require('fs').existsSync(indexPath)) {
+    res.sendFile(indexPath);
+  } else {
+    res.status(404).send('Build not found. Please run "npm run build" in the client folder and ensure the build output is deployed.');
+  }
 });
 
 const PORT = process.env.PORT || 5000;
