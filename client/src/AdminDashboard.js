@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import './AdminDashboard.css';
+import Header from './Header';
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL || 'http://localhost:5000';
 
@@ -99,6 +100,7 @@ export default function AdminDashboard() {
 
   return (
     <div className="admin-dashboard">
+      <Header />
       <h1>Admin Dashboard</h1>
       {error && <div className="error-msg">{error}</div>}
       {loading ? <div>Loading...</div> : (

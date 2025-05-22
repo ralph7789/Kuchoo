@@ -3,6 +3,7 @@ import io from 'socket.io-client';
 import { BrowserRouter as Router, Routes, Route, useNavigate } from 'react-router-dom';
 import './App.css';
 import AdminDashboard from './AdminDashboard';
+import Header from './Header';
 
 // IMPORTANT: Replace this with your actual local IP address
 const BACKEND_URL = 'http://192.168.173.236:5000';
@@ -147,6 +148,7 @@ function ChatPage(props) {
 function SignInPage({ loginForm, setLoginForm, handleLogin, error, goToSignUp }) {
   return (
     <div className="App">
+      <Header />
       <header className="App-header glass-card">
         <form onSubmit={handleLogin} className="auth-form">
           <h2>Login</h2>
@@ -164,6 +166,7 @@ function SignInPage({ loginForm, setLoginForm, handleLogin, error, goToSignUp })
 function SignUpPage({ registerForm, setRegisterForm, handleRegister, goToSignIn }) {
   return (
     <div className="App">
+      <Header />
       <header className="App-header glass-card">
         <form onSubmit={handleRegister} className="auth-form">
           <h2>Register</h2>

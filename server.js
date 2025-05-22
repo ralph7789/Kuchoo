@@ -108,6 +108,32 @@ app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 app.post('/api/register', async (req, res) => {
   try {
     const { email, password, displayName } = req.body;
+    console.log('Register attempt:', { email, displayName });
+    if (!email || !password || !displayName) {
+      console.warn('Register error: Missing fields');
+      return res.status(400).json({ error: 'All fields are required' });
+    }
+    const existing = await User.findOne({ email });
+    if (existing) {
+      console.warn('Register error: Email already registered:', email);
+      return res.status(400).json({ error: 'Email already registered' });
+    }
+    const hashed = await bcrypt.hash(password, 10);
+    const user = await User.create({ email, password: hashed, displayName });
+    req.session.userId = user._id;
+    console.log('User registered:', user._id);
+    res.json({ _id: user._id, email: user.email, displayName: user.displayName });
+  } catch (err) {
+    console.error('Register error:', err);
+    res.status(500).json({ error: 'Internal server error', details: err.message });
+  }
+});
+
+// Admin: Create user (for admin portal)
+app.post('/api/users', requireAuth, async (req, res) => {
+  try {
+    const { email, password, displayName } = req.body;
+    console.log('Admin create user:', { email, displayName });
     if (!email || !password || !displayName) {
       return res.status(400).json({ error: 'All fields are required' });
     }
@@ -117,10 +143,9 @@ app.post('/api/register', async (req, res) => {
     }
     const hashed = await bcrypt.hash(password, 10);
     const user = await User.create({ email, password: hashed, displayName });
-    req.session.userId = user._id;
     res.json({ _id: user._id, email: user.email, displayName: user.displayName });
   } catch (err) {
-    console.error('Register error:', err);
+    console.error('Admin create user error:', err);
     res.status(500).json({ error: 'Internal server error', details: err.message });
   }
 });
@@ -271,12 +296,15 @@ io.on('connection', (socket) => {
 
 // Serve React static files (after all API routes)
 const clientBuildPath = path.join(__dirname, 'client', 'build');
+console.log('Serving React build from:', clientBuildPath);
 app.use(express.static(clientBuildPath));
 app.get(/^\/((?!api|uploads).)*$/, (req, res) => {
   const indexPath = path.join(clientBuildPath, 'index.html');
-  if (require('fs').existsSync(indexPath)) {
+  const fs = require('fs');
+  if (fs.existsSync(indexPath)) {
     res.sendFile(indexPath);
   } else {
+    console.error('Build not found at:', indexPath);
     res.status(404).send('Build not found. Please run "npm run build" in the client folder and ensure the build output is deployed.');
   }
 });
