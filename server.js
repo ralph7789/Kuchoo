@@ -19,6 +19,7 @@ const cors = require('cors');
 const { Server } = require('socket.io');
 const multer = require('multer');
 const path = require('path');
+const MongoStore = require('connect-mongo');
 
 const app = express();
 const server = http.createServer(app);
@@ -30,7 +31,7 @@ const io = new Server(server, {
 });
 
 // MongoDB connection
-mongoose.connect(process.env.MONGO_URI || 'mongodb://localhost:27017/messenger', { useNewUrlParser: true, useUnifiedTopology: true })
+mongoose.connect(process.env.MONGO_URI || 'mongodb://localhost:27017/messenger')
   .then(() => console.log('MongoDB connected'))
   .catch(err => console.log(err));
 
@@ -69,24 +70,32 @@ const Group = mongoose.model('Group', groupSchema);
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
+// CORS setup for Render (allow same-origin and local dev)
 app.use(cors({
   origin: [
     'http://localhost:3000',
     'https://tkxs6mj1-3000.inc1.devtunnels.ms',
-    'https://tkxs6mj1-5000.inc1.devtunnels.ms'
-  ],
+    'https://tkxs6mj1-5000.inc1.devtunnels.ms',
+    process.env.CORS_ORIGIN || undefined // for Render production
+  ].filter(Boolean),
   credentials: true
 }));
 
-app.use(session({ 
-  secret: 'secret', 
-  resave: false, 
+// Use MongoDB for session storage in production
+app.use(session({
+  secret: process.env.SESSION_SECRET || 'secret',
+  resave: false,
   saveUninitialized: false,
+  store: MongoStore.create({
+    mongoUrl: process.env.MONGO_URI || 'mongodb://localhost:27017/messenger',
+    collectionName: 'sessions',
+    ttl: 24 * 60 * 60 // 1 day
+  }),
   cookie: {
     httpOnly: true,
-    secure: false, // set to true if using HTTPS
-    sameSite: 'lax',
-    maxAge: 24 * 60 * 60 * 1000 // 1 day
+    secure: process.env.NODE_ENV === 'production',
+    sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
+    maxAge: 24 * 60 * 60 * 1000
   }
 }));
 
