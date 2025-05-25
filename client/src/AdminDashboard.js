@@ -2,7 +2,7 @@ import React, { useEffect, useState } from 'react';
 import './AdminDashboard.css';
 import Header from './Header';
 
-const BACKEND_URL = process.env.REACT_APP_BACKEND_URL || 'http://localhost:5000';
+const BACKEND_URL = process.env.REACT_APP_BACKEND_URL || '';
 
 export default function AdminDashboard() {
   const [users, setUsers] = useState([]);
@@ -22,12 +22,14 @@ export default function AdminDashboard() {
     try {
       const usersRes = await fetch(`${BACKEND_URL}/api/users`, { credentials: 'include' });
       const usersData = await usersRes.json();
+      if (usersData.error) throw new Error(usersData.error);
       setUsers(Array.isArray(usersData) ? usersData : []);
       const groupsRes = await fetch(`${BACKEND_URL}/api/groups`, { credentials: 'include' });
       const groupsData = await groupsRes.json();
+      if (groupsData.error) throw new Error(groupsData.error);
       setGroups(Array.isArray(groupsData) ? groupsData : []);
     } catch (e) {
-      setError('Failed to fetch data');
+      setError(e.message || 'Failed to fetch data');
     }
     setLoading(false);
   }

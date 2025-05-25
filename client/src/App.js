@@ -5,9 +5,7 @@ import './App.css';
 import AdminDashboard from './AdminDashboard';
 import Header from './Header';
 
-// IMPORTANT: Replace this with your actual local IP address
-const BACKEND_URL = 'http://192.168.173.236:5000';
-const socket = io(BACKEND_URL, { withCredentials: true });
+const BACKEND_URL = process.env.REACT_APP_BACKEND_URL || '';
 
 function ProfileAndSelection({
   user, users, groups, groupName, setGroupName, groupMembers, setGroupMembers, handleCreateGroup, setShowProfile, showProfile, profileForm, setProfileForm, handleProfileUpdate, error, handleLogout, to, setTo, userStatus, setSelectedGroup, selectedGroup, setPage
@@ -41,6 +39,8 @@ function ProfileAndSelection({
                 </option>
               ))}
             </select>
+            {to && (
+            {to && (
             {to && (
               <button className="go-btn" onClick={() => { setPage('chat'); navigate('/chat'); }}>Go to Chat</button>
             )}
