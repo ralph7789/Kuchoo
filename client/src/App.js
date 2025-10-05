@@ -7,6 +7,8 @@ import Header from './Header';
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL || '';
 
+const socket = io(BACKEND_URL);
+
 function ProfileAndSelection({
   user, users, groups, groupName, setGroupName, groupMembers, setGroupMembers, handleCreateGroup, setShowProfile, showProfile, profileForm, setProfileForm, handleProfileUpdate, error, handleLogout, to, setTo, userStatus, setSelectedGroup, selectedGroup, setPage
 }) {
@@ -39,8 +41,6 @@ function ProfileAndSelection({
                 </option>
               ))}
             </select>
-            {to && (
-            {to && (
             {to && (
               <button className="go-btn" onClick={() => { setPage('chat'); navigate('/chat'); }}>Go to Chat</button>
             )}
