@@ -34,15 +34,19 @@ async function handleMenu(option) {
   switch (option.trim()) {
     case '1':
       const users = await User.find();
-      console.table(users.map(u => ({ id: u._id, email: u.email, displayName: u.displayName })));
+      console.table(users.map(u => ({ id: u._id, email: u.email, displayName: u.displayName, isAdmin: u.isAdmin, roles: (u.roles || []).join(','), xid: u.xidId || 'local' })));
       break;
     case '2':
       rl.question('Email: ', email => {
         rl.question('Password: ', password => {
-          rl.question('Display Name: ', async displayName => {
-            await User.create({ email, password, displayName });
-            console.log('User added.');
-            showMenu();
+          rl.question('Display Name: ', displayName => {
+            rl.question('Is Admin (y/N): ', async adminAns => {
+              const isAdmin = adminAns.trim().toLowerCase() === 'y';
+              const roles = isAdmin ? ['user', 'admin', 'xadmin'] : ['user'];
+              await User.create({ email, password, displayName, isAdmin, roles });
+              console.log('User added.');
+              showMenu();
+            });
           });
         });
       });
@@ -53,11 +57,19 @@ async function handleMenu(option) {
         if (!user) { console.log('User not found.'); showMenu(); return; }
         rl.question(`New email (${user.email}): `, async email => {
           rl.question(`New display name (${user.displayName}): `, async displayName => {
-            user.email = email || user.email;
-            user.displayName = displayName || user.displayName;
-            await user.save();
-            console.log('User updated.');
-            showMenu();
+            rl.question(`Set Admin (current: ${user.isAdmin}) [y/n/skip]: `, async adminAns => {
+              user.email = email || user.email;
+              user.displayName = displayName || user.displayName;
+              if (adminAns.trim().toLowerCase() === 'y') {
+                user.isAdmin = true;
+                if (!user.roles.includes('admin')) user.roles.push('admin');
+              } else if (adminAns.trim().toLowerCase() === 'n') {
+                user.isAdmin = false;
+              }
+              await user.save();
+              console.log('User updated.');
+              showMenu();
+            });
           });
         });
       });

@@ -7,18 +7,59 @@ import Header from './Header';
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL || '';
 
+// Initialize global resilient Socket.IO connection
+const socket = io(BACKEND_URL, {
+  withCredentials: true,
+  autoConnect: true,
+  transports: ['websocket', 'polling']
+});
+
 function ProfileAndSelection({
   user, users, groups, groupName, setGroupName, groupMembers, setGroupMembers, handleCreateGroup, setShowProfile, showProfile, profileForm, setProfileForm, handleProfileUpdate, error, handleLogout, to, setTo, userStatus, setSelectedGroup, selectedGroup, setPage
 }) {
   const navigate = useNavigate();
+  const isAdmin = Boolean(user?.isAdmin || (user?.roles && (user.roles.includes('admin') || user.roles.includes('xadmin'))));
+
   return (
     <div className="selection-bg">
       <header className="App-header glass-card">
         <div className="branding">
-          <img src="/logo192.png" alt="Kuchu Logo" className="logo" />
-          <h1>Kuchu</h1>
+          <img src="/logo192.png" alt="Kuchoo Logo" className="logo" />
+          <h1>Kuchoo</h1>
         </div>
-        <button className="profile-btn" onClick={() => setShowProfile(v => !v)}>Edit Profile</button>
+
+        {/* User Identity & Enterprise Status Bar */}
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 10, margin: '8px 0 16px 0', flexWrap: 'wrap' }}>
+          <span style={{ fontSize: 14, fontWeight: 600 }}>
+            {user?.displayName} <span style={{ color: '#94A3B8', fontWeight: 400 }}>({user?.email})</span>
+          </span>
+          <span style={{ fontSize: 11, padding: '2px 8px', borderRadius: 4, background: isAdmin ? '#10B981' : '#3B82F6', color: '#fff', fontWeight: 600 }}>
+            {isAdmin ? '🛡️ XAdmin' : (user?.xidId ? '⚡ XID User' : 'Standard')}
+          </span>
+          {isAdmin && (
+            <button 
+              className="admin-btn" 
+              onClick={() => navigate('/admin')}
+              style={{ background: '#059669', color: '#fff', border: 'none', padding: '4px 10px', borderRadius: 4, cursor: 'pointer', fontSize: 12, fontWeight: 600 }}
+            >
+              Console
+            </button>
+          )}
+          <a 
+            href="https://xcorp.mywire.org" 
+            target="_blank" 
+            rel="noopener noreferrer" 
+            style={{ color: '#00F0FF', textDecoration: 'none', fontSize: 12, display: 'inline-flex', alignItems: 'center', gap: 3 }}
+          >
+            ⚡ Suite
+          </a>
+        </div>
+
+        <div style={{ display: 'flex', gap: 8, justifyContent: 'center', marginBottom: 12 }}>
+          <button className="profile-btn" onClick={() => setShowProfile(v => !v)}>Edit Profile</button>
+          <button className="logout-btn" onClick={handleLogout}>Logout</button>
+        </div>
+
         {showProfile && (
           <form onSubmit={handleProfileUpdate} className="profile-form">
             <input placeholder="Display Name" value={profileForm.displayName} onChange={e => setProfileForm(f => ({ ...f, displayName: e.target.value }))} />
@@ -27,7 +68,6 @@ function ProfileAndSelection({
           </form>
         )}
         {error && <div className="error-msg">{error}</div>}
-        <button className="logout-btn" onClick={handleLogout}>Logout</button>
         <div className="select-section">
           <div className="select-card">
             <label>Chat with:</label>
@@ -39,8 +79,6 @@ function ProfileAndSelection({
                 </option>
               ))}
             </select>
-            {to && (
-            {to && (
             {to && (
               <button className="go-btn" onClick={() => { setPage('chat'); navigate('/chat'); }}>Go to Chat</button>
             )}
@@ -146,10 +184,46 @@ function ChatPage(props) {
 }
 
 function SignInPage({ loginForm, setLoginForm, handleLogin, error, goToSignUp }) {
+  const handleXIDLogin = () => {
+    window.location.href = `${BACKEND_URL}/api/auth/xid/login`;
+  };
+
   return (
     <div className="App">
       <Header />
       <header className="App-header glass-card">
+        {/* Modern XID SSO Button */}
+        <div className="xid-auth-pane" style={{ width: '100%', marginBottom: 20 }}>
+          <button 
+            type="button" 
+            className="xid-sso-btn"
+            onClick={handleXIDLogin}
+            style={{
+              width: '100%',
+              padding: '13px 20px',
+              backgroundColor: '#00F0FF',
+              color: '#060910',
+              border: 'none',
+              borderRadius: '8px',
+              fontSize: '15px',
+              fontWeight: '700',
+              cursor: 'pointer',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              gap: '10px',
+              boxShadow: '0 4px 14px rgba(0, 240, 255, 0.35)',
+              transition: 'all 0.2s ease'
+            }}
+          >
+            <span style={{ fontSize: '18px' }}>⚡</span>
+            <span>Sign in with Xcorp ID</span>
+          </button>
+          <div style={{ textAlign: 'center', margin: '14px 0', color: '#94A3B8', fontSize: '12px', letterSpacing: '0.8px' }}>
+            ─── OR USE LOCAL ACCOUNT ───
+          </div>
+        </div>
+
         <form onSubmit={handleLogin} className="auth-form">
           <h2>Login</h2>
           <input required type="email" placeholder="Email" value={loginForm.email} onChange={e => setLoginForm(f => ({ ...f, email: e.target.value }))} />
@@ -207,7 +281,21 @@ function App() {
   const [peerConnection, setPeerConnection] = useState(null);
   const [authPage, setAuthPage] = useState('login'); // 'login' or 'signup'
 
-  const rtcConfig = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
+  const [rtcConfig, setRtcConfig] = useState({
+    iceServers: [
+      { urls: 'stun:stun.l.google.com:19302' },
+      { urls: 'stun:blitz.xcorp.mywire.org:3478' }
+    ]
+  });
+
+  useEffect(() => {
+    fetch(`${BACKEND_URL}/api/webrtc/config`, { credentials: 'include' })
+      .then(res => res.json())
+      .then(cfg => {
+        if (cfg && cfg.iceServers) setRtcConfig(cfg);
+      })
+      .catch(() => {});
+  }, []);
 
   useEffect(() => {
     fetch(`${BACKEND_URL}/api/user`, { credentials: 'include' })
@@ -519,6 +607,7 @@ function App() {
             stopRecording={stopRecording}
           />
         } />
+        <Route path="/admin" element={<AdminDashboard user={user} />} />
       </Routes>
     </Router>
   );
