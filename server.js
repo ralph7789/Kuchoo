@@ -69,6 +69,10 @@ app.use(express.urlencoded({ extended: true }));
 const allowedOrigins = [
   'http://localhost:3000',
   'http://localhost:5000',
+  'https://kuchoo.xcorp.mywire.org',
+  'https://kuchoo.xcorp.ddnsfree.com',
+  'https://kuchoo.xcorp.freeddns.org',
+  'https://kuchoo.xcorp.kozow.com',
   'https://chat.xcorp.mywire.org',
   'https://chat.xcorp.ddnsfree.com',
   'https://chat.xcorp.freeddns.org',
@@ -425,12 +429,16 @@ app.post('/api/profile', requireAuth, async (req, res) => {
 // ==========================================
 app.get('/api/messages/:user1/:user2', requireAuth, async (req, res) => {
   const { user1, user2 } = req.params;
-  const messages = await Message.find({
-    $or: [
-      { from: user1, to: user2 },
-      { from: user2, to: user1 }
-    ]
-  }).sort('timestamp');
+  const isGroup = await Group.exists({ _id: user2 }).catch(() => false);
+  const query = isGroup
+    ? { to: user2 }
+    : {
+        $or: [
+          { from: user1, to: user2 },
+          { from: user2, to: user1 }
+        ]
+      };
+  const messages = await Message.find(query).sort('timestamp');
   res.json(messages);
 });
 
@@ -453,18 +461,26 @@ app.post('/api/messages/:id/read', requireAuth, async (req, res) => {
 // Group Chat APIs
 // ==========================================
 app.post('/api/groups', requireAuth, async (req, res) => {
-  const { name, members } = req.body;
-  const group = await Group.create({ name, members, createdBy: req.user._id.toString() });
+  const { name, members = [] } = req.body;
+  const memberSet = new Set(members.map(m => m.toString()));
+  memberSet.add(req.user._id.toString());
+  const group = await Group.create({
+    name,
+    members: Array.from(memberSet),
+    createdBy: req.user._id,
+    isPublic: true
+  });
   res.json(group);
 });
 
 app.get('/api/groups', requireAuth, async (req, res) => {
   const groups = await Group.find({
     $or: [
-      { members: req.user._id.toString() },
-      { createdBy: req.user._id.toString() }
+      { isPublic: true },
+      { members: req.user._id },
+      { createdBy: req.user._id }
     ]
-  });
+  }).sort('name');
   res.json(groups);
 });
 
