@@ -1,10 +1,12 @@
 import React, { useEffect, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import './AdminDashboard.css';
 import Header from './Header';
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL || '';
 
-export default function AdminDashboard() {
+export default function AdminDashboard({ user }) {
+  const navigate = useNavigate();
   const [users, setUsers] = useState([]);
   const [groups, setGroups] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -103,7 +105,15 @@ export default function AdminDashboard() {
   return (
     <div className="admin-dashboard">
       <Header />
-      <h1>Admin Dashboard</h1>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 20 }}>
+        <h1>Admin Dashboard</h1>
+        <button 
+          onClick={() => navigate('/')} 
+          style={{ padding: '8px 16px', background: '#3B82F6', color: '#fff', border: 'none', borderRadius: 6, cursor: 'pointer', fontWeight: 600 }}
+        >
+          ← Back to Messenger
+        </button>
+      </div>
       {error && <div className="error-msg">{error}</div>}
       {loading ? <div>Loading...</div> : (
         <>
@@ -117,13 +127,19 @@ export default function AdminDashboard() {
             </form>
             <table className="admin-table">
               <thead>
-                <tr><th>Email</th><th>Display Name</th><th>Actions</th></tr>
+                <tr><th>Email</th><th>Display Name</th><th>Role / XID</th><th>Actions</th></tr>
               </thead>
               <tbody>
                 {users.map(u => (
                   <tr key={u._id}>
                     <td>{u.email}</td>
                     <td>{u.displayName}</td>
+                    <td>
+                      <span style={{ fontSize: 12, padding: '2px 8px', borderRadius: 4, background: u.isAdmin ? '#10B981' : '#374151', color: '#fff' }}>
+                        {u.isAdmin ? 'XAdmin' : (u.roles ? u.roles.join(', ') : 'User')}
+                      </span>
+                      {u.xidId && <span style={{ marginLeft: 6, fontSize: 11, color: '#00F0FF' }}>⚡ XID</span>}
+                    </td>
                     <td>
                       <button onClick={() => setEditUser(u)}>Edit</button>
                       <button onClick={() => handleDeleteUser(u._id)}>Delete</button>
