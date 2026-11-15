@@ -220,7 +220,11 @@ function Workspace({
   handleDeleteMessage,
   handlePinMessage,
   starredIds = [],
-  handleToggleStar
+  handleToggleStar,
+  activeHuddle,
+  handleStartHuddle,
+  handleLeaveHuddle,
+  peerConnection
 }) {
   const navigate = useNavigate();
   const [activeView, setActiveView] = useState('chats');
@@ -291,6 +295,7 @@ function Workspace({
             inspectorOpen={inspectorOpen}
             starredIds={starredIds}
             onToggleStar={handleToggleStar}
+            onStartHuddle={handleStartHuddle}
           />
         )}
 
@@ -367,7 +372,11 @@ function Workspace({
           allUsers={users}
           localStream={localStream}
           remoteStream={remoteStream}
-          onEndCall={endCall}
+          peerConnection={peerConnection}
+          isHuddle={Boolean(activeHuddle)}
+          huddleTitle={activeHuddle ? activeHuddle.name : ''}
+          huddleParticipants={activeHuddle ? activeHuddle.participants : []}
+          onEndCall={activeHuddle ? handleLeaveHuddle : endCall}
         />
       )}
 
@@ -438,12 +447,28 @@ function App() {
   const [recording, setRecording] = useState(false);
   const [mediaRecorder, setMediaRecorder] = useState(null);
 
-  // WebRTC Call States
+  // WebRTC Call & Slack Huddle States
   const [callUserId, setCallUserId] = useState(null);
   const [callIncoming, setCallIncoming] = useState(null);
   const [localStream, setLocalStream] = useState(null);
   const [remoteStream, setRemoteStream] = useState(null);
   const [peerConnection, setPeerConnection] = useState(null);
+  const [activeHuddle, setActiveHuddle] = useState(null); // { channelId, name, participants: [] }
+
+  const handleStartHuddle = (group) => {
+    if (!group || !user) return;
+    socket.emit('huddle_join', { channelId: group._id, user });
+    setActiveHuddle({ channelId: group._id, name: group.name, participants: [] });
+    setCallUserId(group._id);
+  };
+
+  const handleLeaveHuddle = () => {
+    if (activeHuddle) {
+      socket.emit('huddle_leave', { channelId: activeHuddle.channelId });
+      setActiveHuddle(null);
+      setCallUserId(null);
+    }
+  };
 
   const messagesEndRef = useRef(null);
 
@@ -577,6 +602,10 @@ function App() {
       setUsers(prev => prev.map(u => u._id === statusPayload.userId ? { ...u, customStatus: statusPayload.customStatus, dnd: statusPayload.dnd } : u));
     };
 
+    const handleHuddleRoster = ({ channelId, participants }) => {
+      setActiveHuddle(prev => prev && prev.channelId === channelId ? { ...prev, participants } : prev);
+    };
+
     socket.on('receive_message', handleReceiveMessage);
     socket.on('message_updated', handleMessageUpdated);
     socket.on('message_deleted', handleMessageDeleted);
@@ -585,6 +614,7 @@ function App() {
     socket.on('user_status', handleUserStatus);
     socket.on('user_mention', handleUserMention);
     socket.on('user_status_updated', handleUserStatusUpdated);
+    socket.on('huddle_roster', handleHuddleRoster);
 
     return () => {
       socket.off('receive_message', handleReceiveMessage);
@@ -595,6 +625,7 @@ function App() {
       socket.off('user_status', handleUserStatus);
       socket.off('user_mention', handleUserMention);
       socket.off('user_status_updated', handleUserStatusUpdated);
+      socket.off('huddle_roster', handleHuddleRoster);
     };
   }, [activeTarget, user]);
 
@@ -946,6 +977,10 @@ function App() {
                 handlePinMessage={handlePinMessage}
                 starredIds={starredIds}
                 handleToggleStar={handleToggleStar}
+                activeHuddle={activeHuddle}
+                handleStartHuddle={handleStartHuddle}
+                handleLeaveHuddle={handleLeaveHuddle}
+                peerConnection={peerConnection}
               />
             )
           }

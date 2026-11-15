@@ -1032,6 +1032,9 @@ io.use(async (socket, next) => {
   }
 });
 
+// In-Memory Huddle Roster (Slack Huddles parity)
+const activeHuddles = new Map();
+
 io.on('connection', (socket) => {
   socket.on('join', (userId) => {
     socket.join(userId);
@@ -1199,7 +1202,9 @@ io.on('connection', (socket) => {
     }
   });
 
-  // WebRTC Audio/Video Call Signaling
+  // ==========================================
+  // WebRTC Audio/Video & Slack Huddle Signaling
+  // ==========================================
   socket.on('call_offer', ({ to, offer }) => {
     socket.to(to).emit('call_offer', { from: socket.id, offer });
   });
@@ -1208,6 +1213,74 @@ io.on('connection', (socket) => {
   });
   socket.on('ice_candidate', ({ to, candidate }) => {
     socket.to(to).emit('ice_candidate', { candidate });
+  });
+
+  // Channel Huddle Group WebRTC Signaling (Slack/Teams parity)
+  socket.on('huddle_join', ({ channelId, user }) => {
+    socket.join(`huddle_${channelId}`);
+    if (!activeHuddles.has(channelId)) {
+      activeHuddles.set(channelId, new Map());
+    }
+    const huddleMap = activeHuddles.get(channelId);
+    huddleMap.set(socket.id, {
+      socketId: socket.id,
+      userId: user?._id,
+      displayName: user?.displayName || 'Teammate',
+      avatar: user?.avatar,
+      sharingScreen: false
+    });
+
+    const participants = Array.from(huddleMap.values());
+    io.to(`huddle_${channelId}`).emit('huddle_roster', { channelId, participants });
+    io.to(channelId).emit('huddle_active_state', { channelId, activeCount: participants.length });
+  });
+
+  socket.on('huddle_leave', ({ channelId }) => {
+    socket.leave(`huddle_${channelId}`);
+    if (activeHuddles.has(channelId)) {
+      const huddleMap = activeHuddles.get(channelId);
+      huddleMap.delete(socket.id);
+      const participants = Array.from(huddleMap.values());
+      io.to(`huddle_${channelId}`).emit('huddle_roster', { channelId, participants });
+      io.to(channelId).emit('huddle_active_state', { channelId, activeCount: participants.length });
+      if (huddleMap.size === 0) activeHuddles.delete(channelId);
+    }
+  });
+
+  socket.on('huddle_signal', ({ toSocketId, signal, fromUser }) => {
+    io.to(toSocketId).emit('huddle_signal', { fromSocketId: socket.id, signal, fromUser });
+  });
+
+  socket.on('huddle_screen_share', ({ channelId, sharing }) => {
+    if (activeHuddles.has(channelId)) {
+      const huddleMap = activeHuddles.get(channelId);
+      if (huddleMap.has(socket.id)) {
+        huddleMap.get(socket.id).sharingScreen = Boolean(sharing);
+        io.to(`huddle_${channelId}`).emit('huddle_roster', { channelId, participants: Array.from(huddleMap.values()) });
+      }
+    }
+  });
+
+  socket.on('disconnect', () => {
+    for (const [channelId, huddleMap] of activeHuddles.entries()) {
+      if (huddleMap.has(socket.id)) {
+        huddleMap.delete(socket.id);
+        const participants = Array.from(huddleMap.values());
+        io.to(`huddle_${channelId}`).emit('huddle_roster', { channelId, participants });
+        io.to(channelId).emit('huddle_active_state', { channelId, activeCount: participants.length });
+        if (huddleMap.size === 0) activeHuddles.delete(channelId);
+      }
+    }
+  });
+});
+
+// Huddle Status REST API
+app.get('/api/huddles/:channelId', requireAuth, (req, res) => {
+  const huddleMap = activeHuddles.get(req.params.channelId);
+  res.json({
+    channelId: req.params.channelId,
+    active: Boolean(huddleMap && huddleMap.size > 0),
+    participants: huddleMap ? Array.from(huddleMap.values()) : []
   });
 });
 

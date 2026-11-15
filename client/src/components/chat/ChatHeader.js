@@ -1,5 +1,5 @@
 import React from 'react';
-import { Phone, Video, Info, Hash, AtSign, Sparkles, Lock, Star } from '../common/Icons';
+import { Phone, Video, Info, Hash, AtSign, Sparkles, Lock, Star, Headphones } from '../common/Icons';
 
 export default function ChatHeader({
   activeTarget,
@@ -9,7 +9,8 @@ export default function ChatHeader({
   onToggleInspector,
   inspectorOpen,
   starredIds = [],
-  onToggleStar
+  onToggleStar,
+  onStartHuddle
 }) {
   if (!activeTarget) return null;
 
@@ -98,6 +99,29 @@ export default function ChatHeader({
               <Video size={17} />
             </button>
           </>
+        )}
+
+        {/* Huddle trigger for Group Channels (Slack Huddles parity) */}
+        {isGroup && onStartHuddle && (
+          <button
+            className="header-action-btn header-call-btn"
+            title="Start or Join Channel Huddle"
+            onClick={() => onStartHuddle(targetGroup)}
+            style={{
+              padding: '0 10px',
+              gap: 6,
+              display: 'flex',
+              alignItems: 'center',
+              background: 'rgba(0, 240, 255, 0.1)',
+              borderColor: 'rgba(0, 240, 255, 0.3)',
+              color: '#00F0FF',
+              fontWeight: 600,
+              fontSize: 12
+            }}
+          >
+            <Headphones size={15} />
+            <span>Huddle</span>
+          </button>
         )}
 
         {/* Inspector Pane Toggle */}
