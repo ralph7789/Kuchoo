@@ -22,6 +22,7 @@ COPY package*.json ./
 RUN npm install --omit=dev
 
 COPY models/ ./models/
+COPY lib/ ./lib/
 COPY server.js ./
 COPY admin.js ./
 COPY --from=client-builder /app/client/build ./client/build

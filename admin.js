@@ -2,15 +2,17 @@
 // Usage: node admin.js
 
 const readline = require('readline');
-const mongoose = require('mongoose');
-const User = require('./models/User'); // You must have a User model
-const Group = require('./models/Group'); // You must have a Group model
+const mongoose = require('./lib/xdb_mongoose');
+try {
+  require.cache[require.resolve('mongoose')] = { exports: mongoose };
+} catch (_) {}
 
-const MONGO_URI = process.env.MONGO_URI || process.env.MONGODB_URI || process.env.MONGO_URL || process.env.DATABASE_URL || 'mongodb://127.0.0.1:27017/kuchoo';
+const User = require('./models/User');
+const Group = require('./models/Group');
 
-mongoose.connect(MONGO_URI)
-  .then(() => console.log('Connected to MongoDB'))
-  .catch(err => console.error('MongoDB connection error:', err));
+mongoose.connect()
+  .then(() => console.log(`Connected to XDB Unified Database (${mongoose.getXdbEndpoint()})`))
+  .catch(err => console.error('XDB connection error:', err));
 
 const rl = readline.createInterface({
   input: process.stdin,

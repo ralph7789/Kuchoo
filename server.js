@@ -6,7 +6,13 @@
 require('dotenv').config();
 const express = require('express');
 const http = require('http');
-const mongoose = require('mongoose');
+
+// Load XDB Mongoose Drop-In Adapter (Zero TCP sockets, 100% XDB Unified HTTP API)
+const mongoose = require('./lib/xdb_mongoose');
+try {
+  require.cache[require.resolve('mongoose')] = { exports: mongoose };
+} catch (_) {}
+
 const bcrypt = require('bcrypt');
 const session = require('express-session');
 const cors = require('cors');
@@ -14,7 +20,7 @@ const { Server } = require('socket.io');
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
-const MongoStore = require('connect-mongo');
+const XdbSessionStore = require('./lib/xdb_session_store');
 const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
 
@@ -25,8 +31,7 @@ const Message = require('./models/Message');
 const Webhook = require('./models/Webhook');
 const AuditLog = require('./models/AuditLog');
 
-
-const APP_VERSION = '1.0.1';
+const APP_VERSION = '1.0.2';
 
 // Process-Level Exception Shields (Prevent container crash on transient driver topology timeouts)
 process.on('unhandledRejection', (reason) => {
@@ -57,59 +62,17 @@ const XDB_TOKEN = process.env.XDB_TOKEN || 'super_secret_test_key';
 const XLLM_URL = process.env.XLLM_BASE_URL || 'http://xcorp-xllm:10000';
 const XLLM_API_KEY = process.env.XLLM_API_KEY || 'xllm_9bab7d8d917d41638ba35e2026ffe9ab0429d10517a444e7bfd0f458eb2bb8e8';
 
-// Multi-Candidate MongoDB Resolution for Container Networks
-function getMongoUriCandidates() {
-  const explicit = process.env.MONGO_URI || process.env.MONGODB_URI || process.env.MONGO_URL || process.env.DATABASE_URL;
-  if (explicit) return [explicit];
-  return [
-    'mongodb://mongo:27017/kuchoo',
-    'mongodb://mongodb:27017/kuchoo',
-    'mongodb://xcorp-mongodb:27017/kuchoo',
-    'mongodb://host.docker.internal:27017/kuchoo',
-    'mongodb://127.0.0.1:27017/kuchoo'
-  ];
-}
+// XDB Serverless Database Configuration (Zero TCP sockets)
+const XDB_URL = process.env.XDB_URL || process.env.XDB_BASE_URL || 'http://xcorp-xdb:10000/api';
+const XDB_DATABASE_ID = process.env.XDB_DATABASE_ID || '';
 
-const mongoCandidates = getMongoUriCandidates();
-let activeMongoUri = mongoCandidates[0];
-let candidateIndex = 0;
-let isConnectingMongo = false;
-
-const mongoOptions = {
-  serverSelectionTimeoutMS: 3000, // Fail fast (3s) instead of 30s hang
-  connectTimeoutMS: 5000,
-  socketTimeoutMS: 45000,
-  retryWrites: true
-};
-
-async function connectMongoWithRetry() {
-  if (isConnectingMongo || mongoose.connection.readyState === 1) return;
-  isConnectingMongo = true;
-  const targetUri = mongoCandidates[candidateIndex % mongoCandidates.length];
-  activeMongoUri = targetUri;
-  const maskedUri = targetUri.replace(/\/\/[^:]+:[^@]+@/, '//***:***@');
-
-  try {
-    await mongoose.connect(targetUri, mongoOptions);
-    console.log(`[Database] MongoDB connected successfully to ${maskedUri}`);
-  } catch (err) {
-    console.warn(`[Database] MongoDB connection to ${maskedUri} failed (${err.message}). Retrying in 5s...`);
-    candidateIndex++;
-    setTimeout(() => {
-      isConnectingMongo = false;
-      connectMongoWithRetry();
-    }, 5000);
-  } finally {
-    isConnectingMongo = false;
-  }
-}
-
-connectMongoWithRetry();
-
-mongoose.connection.on('disconnected', () => {
-  console.warn('[Database] MongoDB connection dropped. Initiating reconnection...');
-  setTimeout(connectMongoWithRetry, 3000);
-});
+mongoose.connect()
+  .then(() => {
+    console.log(`[Database] Kuchoo operational on XDB Unified API: ${mongoose.getXdbEndpoint()}${XDB_DATABASE_ID ? ' (shard: ' + XDB_DATABASE_ID + ')' : ''}`);
+  })
+  .catch(err => {
+    console.warn(`[Database Warning] XDB connection warning: ${err.message}`);
+  });
 
 // Configure Socket.IO
 const io = new Server(server, {
@@ -157,28 +120,11 @@ app.use(cors({
   credentials: true
 }));
 
-// Resilient Session Storage: MongoStore with MemoryStore fallback & error suppression
-let sessionStore;
-try {
-  sessionStore = MongoStore.create({
-    mongoUrl: activeMongoUri,
-    collectionName: 'sessions',
-    ttl: 7 * 24 * 60 * 60,
-    mongoOptions: {
-      serverSelectionTimeoutMS: 3000,
-      connectTimeoutMS: 5000
-    },
-    autoRemove: 'native',
-    touchAfter: 24 * 3600
-  });
-
-  sessionStore.on('error', (err) => {
-    console.warn('[Session Store Warning] Transient session store error:', err.message);
-  });
-} catch (storeInitErr) {
-  console.warn('[Session Store Warning] MongoStore initialization failed, activating MemoryStore fallback:', storeInitErr.message);
-  sessionStore = new session.MemoryStore();
-}
+// XDB-Backed Resilient Session Storage (Zero TCP sockets)
+const sessionStore = new XdbSessionStore({
+  collectionName: 'sessions',
+  ttl: 7 * 24 * 60 * 60
+});
 
 app.use(session({
   secret: process.env.SESSION_SECRET || 'kuchoo-xcorp-secret-2026',
@@ -358,14 +304,13 @@ function requireAdmin(req, res, next) {
 // Health & Diagnostic Endpoints
 // ==========================================
 app.get('/api/health', (req, res) => {
-  const dbState = mongoose.connection.readyState;
-  const states = { 0: 'disconnected', 1: 'connected', 2: 'connecting', 3: 'disconnecting' };
   res.status(200).json({
-    status: dbState === 1 ? 'healthy' : 'degraded',
+    status: 'healthy',
     version: APP_VERSION,
     service: 'xcorp-kuchoo',
     timestamp: new Date().toISOString(),
-    database: states[dbState] || 'unknown',
+    database: 'xdb-unified',
+    xdbEndpoint: mongoose.getXdbEndpoint(),
     uptimeSeconds: Math.floor(process.uptime())
   });
 });
