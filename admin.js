@@ -6,9 +6,9 @@ const mongoose = require('mongoose');
 const User = require('./models/User'); // You must have a User model
 const Group = require('./models/Group'); // You must have a Group model
 
-const MONGO_URI = process.env.MONGO_URI || 'mongodb://localhost:27017/messenger';
+const MONGO_URI = process.env.MONGO_URI || process.env.MONGODB_URI || process.env.MONGO_URL || process.env.DATABASE_URL || 'mongodb://127.0.0.1:27017/kuchoo';
 
-mongoose.connect(MONGO_URI, { useNewUrlParser: true, useUnifiedTopology: true })
+mongoose.connect(MONGO_URI)
   .then(() => console.log('Connected to MongoDB'))
   .catch(err => console.error('MongoDB connection error:', err));
 

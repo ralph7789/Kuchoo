@@ -36,13 +36,7 @@ jobs:
           node-version: 20
 
       - name: Execute In-Memory Milestones Test Suite
-        run: |
-          node test_milestone1_parity.js
-          node test_milestone2_parity.js
-          node test_milestone3_parity.js
-          node test_milestone4_parity.js
-          node test_milestone5_parity.js
-          node test_milestone6_parity.js
+        run: npm test
 
   build-and-push:
     name: Build & Publish Container Image

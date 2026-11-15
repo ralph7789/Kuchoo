@@ -1,6 +1,6 @@
 {
-  "name": "messenger",
-  "version": "1.0.0",
+  "name": "kuchoo",
+  "version": "1.0.1",
   "main": "index.js",
   "scripts": {
     "start": "node server.js",

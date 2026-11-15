@@ -26,13 +26,28 @@ const Webhook = require('./models/Webhook');
 const AuditLog = require('./models/AuditLog');
 
 
+const APP_VERSION = '1.0.1';
+
+// Process-Level Exception Shields (Prevent container crash on transient driver topology timeouts)
+process.on('unhandledRejection', (reason) => {
+  console.warn('[Process Shield] Intercepted unhandled rejection:', reason && reason.message ? reason.message : reason);
+});
+
+process.on('uncaughtException', (err) => {
+  console.error('[Process Shield] Intercepted uncaught exception:', err.message);
+  if (err.name === 'MongoServerSelectionError' || err.name === 'MongoNetworkError' || err.name === 'MongoTopologyClosedError') {
+    console.warn('[Process Shield] MongoDB transient topology error intercepted. Process remaining alive.');
+    return;
+  }
+  process.exit(1);
+});
+
 const app = express();
 app.set('trust proxy', 1);
 const server = http.createServer(app);
 
 // Configuration & Secrets
 const PORT = process.env.PORT || 5000;
-const MONGO_URI = process.env.MONGO_URI || 'mongodb://localhost:27017/kuchoo';
 const JWT_SECRET = process.env.JWT_SECRET || '16f8c0ef4a5d391b26034086c628469d3f9f497f08163ab9b40137092f2909ef';
 const XID_ISSUER = process.env.XID_ISSUER_URL || 'https://xid.xcorp.mywire.org';
 const XID_INTERNAL_URL = process.env.XID_INTERNAL_URL || 'http://xcorp-xid:10000';
@@ -42,10 +57,59 @@ const XDB_TOKEN = process.env.XDB_TOKEN || 'super_secret_test_key';
 const XLLM_URL = process.env.XLLM_BASE_URL || 'http://xcorp-xllm:10000';
 const XLLM_API_KEY = process.env.XLLM_API_KEY || 'xllm_9bab7d8d917d41638ba35e2026ffe9ab0429d10517a444e7bfd0f458eb2bb8e8';
 
-// Connect to MongoDB
-mongoose.connect(MONGO_URI)
-  .then(() => console.log('MongoDB connected successfully'))
-  .catch(err => console.error('MongoDB connection error:', err.message));
+// Multi-Candidate MongoDB Resolution for Container Networks
+function getMongoUriCandidates() {
+  const explicit = process.env.MONGO_URI || process.env.MONGODB_URI || process.env.MONGO_URL || process.env.DATABASE_URL;
+  if (explicit) return [explicit];
+  return [
+    'mongodb://mongo:27017/kuchoo',
+    'mongodb://mongodb:27017/kuchoo',
+    'mongodb://xcorp-mongodb:27017/kuchoo',
+    'mongodb://host.docker.internal:27017/kuchoo',
+    'mongodb://127.0.0.1:27017/kuchoo'
+  ];
+}
+
+const mongoCandidates = getMongoUriCandidates();
+let activeMongoUri = mongoCandidates[0];
+let candidateIndex = 0;
+let isConnectingMongo = false;
+
+const mongoOptions = {
+  serverSelectionTimeoutMS: 3000, // Fail fast (3s) instead of 30s hang
+  connectTimeoutMS: 5000,
+  socketTimeoutMS: 45000,
+  retryWrites: true
+};
+
+async function connectMongoWithRetry() {
+  if (isConnectingMongo || mongoose.connection.readyState === 1) return;
+  isConnectingMongo = true;
+  const targetUri = mongoCandidates[candidateIndex % mongoCandidates.length];
+  activeMongoUri = targetUri;
+  const maskedUri = targetUri.replace(/\/\/[^:]+:[^@]+@/, '//***:***@');
+
+  try {
+    await mongoose.connect(targetUri, mongoOptions);
+    console.log(`[Database] MongoDB connected successfully to ${maskedUri}`);
+  } catch (err) {
+    console.warn(`[Database] MongoDB connection to ${maskedUri} failed (${err.message}). Retrying in 5s...`);
+    candidateIndex++;
+    setTimeout(() => {
+      isConnectingMongo = false;
+      connectMongoWithRetry();
+    }, 5000);
+  } finally {
+    isConnectingMongo = false;
+  }
+}
+
+connectMongoWithRetry();
+
+mongoose.connection.on('disconnected', () => {
+  console.warn('[Database] MongoDB connection dropped. Initiating reconnection...');
+  setTimeout(connectMongoWithRetry, 3000);
+});
 
 // Configure Socket.IO
 const io = new Server(server, {
@@ -57,6 +121,12 @@ const io = new Server(server, {
 
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+
+// Attach App Version header
+app.use((req, res, next) => {
+  res.setHeader('X-App-Version', APP_VERSION);
+  next();
+});
 
 // Allowed CORS origins for XCorp Suite
 const allowedOrigins = [
@@ -87,16 +157,34 @@ app.use(cors({
   credentials: true
 }));
 
-// Session storage backed by MongoDB
+// Resilient Session Storage: MongoStore with MemoryStore fallback & error suppression
+let sessionStore;
+try {
+  sessionStore = MongoStore.create({
+    mongoUrl: activeMongoUri,
+    collectionName: 'sessions',
+    ttl: 7 * 24 * 60 * 60,
+    mongoOptions: {
+      serverSelectionTimeoutMS: 3000,
+      connectTimeoutMS: 5000
+    },
+    autoRemove: 'native',
+    touchAfter: 24 * 3600
+  });
+
+  sessionStore.on('error', (err) => {
+    console.warn('[Session Store Warning] Transient session store error:', err.message);
+  });
+} catch (storeInitErr) {
+  console.warn('[Session Store Warning] MongoStore initialization failed, activating MemoryStore fallback:', storeInitErr.message);
+  sessionStore = new session.MemoryStore();
+}
+
 app.use(session({
   secret: process.env.SESSION_SECRET || 'kuchoo-xcorp-secret-2026',
   resave: false,
   saveUninitialized: false,
-  store: MongoStore.create({
-    mongoUrl: MONGO_URI,
-    collectionName: 'sessions',
-    ttl: 7 * 24 * 60 * 60 // 7 days
-  }),
+  store: sessionStore,
   cookie: {
     httpOnly: true,
     secure: process.env.NODE_ENV === 'production',
@@ -104,6 +192,16 @@ app.use(session({
     maxAge: 7 * 24 * 60 * 60 * 1000
   }
 }));
+
+// Intercept session driver errors in express pipeline to prevent 500 crashes
+app.use((err, req, res, next) => {
+  if (err && (err.name === 'MongoServerSelectionError' || err.name === 'MongoNetworkError')) {
+    console.warn('[Session Pipeline] Session error bypassed during DB recovery:', err.message);
+    req.session = req.session || {};
+    return next();
+  }
+  next(err);
+});
 
 // Ensure uploads folder exists
 const uploadDir = path.join(__dirname, 'uploads');
@@ -260,11 +358,15 @@ function requireAdmin(req, res, next) {
 // Health & Diagnostic Endpoints
 // ==========================================
 app.get('/api/health', (req, res) => {
-  res.json({
-    status: 'healthy',
+  const dbState = mongoose.connection.readyState;
+  const states = { 0: 'disconnected', 1: 'connected', 2: 'connecting', 3: 'disconnecting' };
+  res.status(200).json({
+    status: dbState === 1 ? 'healthy' : 'degraded',
+    version: APP_VERSION,
     service: 'xcorp-kuchoo',
     timestamp: new Date().toISOString(),
-    database: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected'
+    database: states[dbState] || 'unknown',
+    uptimeSeconds: Math.floor(process.uptime())
   });
 });
 
