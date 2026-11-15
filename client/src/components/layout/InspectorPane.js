@@ -1,5 +1,5 @@
 import React from 'react';
-import { X, Phone, Video, Shield, FileText } from '../common/Icons';
+import { X, Phone, Video, Shield, FileText, Pin } from '../common/Icons';
 
 export default function InspectorPane({
   activeTarget,
@@ -8,7 +8,9 @@ export default function InspectorPane({
   onClose,
   onStartAudioCall,
   onStartVideoCall,
-  sharedFiles = []
+  sharedFiles = [],
+  pinnedMessages = [],
+  onUnpinMessage
 }) {
   if (!activeTarget) return null;
 
@@ -160,6 +162,38 @@ export default function InspectorPane({
             </div>
           </div>
         )}
+
+        {/* Pinned Messages (Slack/Teams parity) */}
+        <div style={{ marginBottom: 20 }}>
+          <div style={{ fontSize: 12, fontWeight: 700, textTransform: 'uppercase', color: '#64748B', letterSpacing: '0.06em', marginBottom: 10, display: 'flex', alignItems: 'center', gap: 6 }}>
+            <Pin size={13} color="#00F0FF" />
+            <span>Pinned Messages ({pinnedMessages.length})</span>
+          </div>
+          {pinnedMessages.length === 0 ? (
+            <div style={{ fontSize: 12, color: '#64748B' }}>No pinned messages in this conversation</div>
+          ) : (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+              {pinnedMessages.map((pin) => (
+                <div key={pin._id} className="inspector-pinned-card">
+                  <div style={{ fontSize: 11, color: '#94A3B8', display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
+                    <span>{pin.pinnedBy || 'Member'}</span>
+                    <button
+                      type="button"
+                      className="pinned-unpin-btn"
+                      title="Unpin"
+                      onClick={() => onUnpinMessage && onUnpinMessage(pin._id)}
+                    >
+                      Unpin
+                    </button>
+                  </div>
+                  <div style={{ fontSize: 12, color: '#F8FAFC', maxHeight: 48, overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                    {pin.content || '[Attachment]'}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
 
         {/* Shared Files & Media */}
         <div>

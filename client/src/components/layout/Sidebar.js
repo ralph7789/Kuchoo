@@ -1,5 +1,7 @@
-import React from 'react';
-import { Search, Plus, Hash, Sparkles, Shield } from '../common/Icons';
+import React, { useState, useEffect } from 'react';
+import { Search, Plus, Hash, Sparkles, Shield, MessageSquare } from '../common/Icons';
+
+const BACKEND_URL = process.env.REACT_APP_BACKEND_URL || '';
 
 export default function Sidebar({
   user,
@@ -13,6 +15,30 @@ export default function Sidebar({
   setSearchQuery,
   unreadCounts = {}
 }) {
+  const [searchResults, setSearchResults] = useState([]);
+  const [searchLoading, setSearchLoading] = useState(false);
+
+  // Debounced Universal Message Search (Slack/Teams parity)
+  useEffect(() => {
+    if (!searchQuery || searchQuery.trim().length < 2) {
+      setSearchResults([]);
+      return;
+    }
+
+    const timer = setTimeout(() => {
+      setSearchLoading(true);
+      fetch(`${BACKEND_URL}/api/search?q=${encodeURIComponent(searchQuery.trim())}`, { credentials: 'include' })
+        .then(res => res.json())
+        .then(data => {
+          if (Array.isArray(data)) setSearchResults(data);
+        })
+        .catch(err => console.error('Sidebar search error:', err))
+        .finally(() => setSearchLoading(false));
+    }, 280);
+
+    return () => clearTimeout(timer);
+  }, [searchQuery]);
+
   const filteredUsers = (Array.isArray(users) ? users : [])
     .filter(u => u._id !== user?._id)
     .filter(u => 
@@ -35,14 +61,14 @@ export default function Sidebar({
         </div>
       </div>
 
-      {/* Search Input */}
+      {/* Universal Search Input */}
       <div className="sidebar-search-box">
         <div className="sidebar-search-input-wrapper">
           <Search size={15} className="sidebar-search-icon" />
           <input
             type="text"
             className="sidebar-search-input"
-            placeholder="Search channels & members... (⌘K)"
+            placeholder="Search channels, members & messages... (⌘K)"
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
           />
@@ -51,6 +77,49 @@ export default function Sidebar({
 
       {/* Scrollable Content */}
       <div className="sidebar-content-scroll">
+        {/* Message Search Results Section */}
+        {searchQuery.trim().length >= 2 && (
+          <div className="sidebar-section">
+            <div className="sidebar-section-header">
+              <span>Messages Matching ({searchResults.length})</span>
+            </div>
+            {searchLoading ? (
+              <div style={{ padding: '8px 12px', fontSize: 12, color: '#94A3B8' }}>Searching...</div>
+            ) : searchResults.length === 0 ? (
+              <div style={{ padding: '8px 12px', fontSize: 12, color: '#64748B' }}>No message matches found</div>
+            ) : (
+              searchResults.map(msg => (
+                <div
+                  key={msg._id}
+                  className="sidebar-nav-item"
+                  style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start', padding: '6px 12px', gap: 2 }}
+                  onClick={() => {
+                    const matchedGroup = groups.find(g => g._id === msg.to);
+                    if (matchedGroup) {
+                      onSelectTarget({ type: 'group', id: matchedGroup._id, name: matchedGroup.name, group: matchedGroup });
+                    } else {
+                      const matchedUser = users.find(u => u._id === msg.to || u._id === msg.from);
+                      if (matchedUser) {
+                        onSelectTarget({ type: 'user', id: matchedUser._id, name: matchedUser.displayName, user: matchedUser });
+                      }
+                    }
+                  }}
+                >
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6, width: '100%' }}>
+                    <MessageSquare size={13} color="#00F0FF" />
+                    <span style={{ fontSize: 11, color: '#94A3B8' }}>
+                      {new Date(msg.timestamp).toLocaleDateString([], { month: 'short', day: 'numeric' })}
+                    </span>
+                  </div>
+                  <div style={{ fontSize: 12, color: '#F8FAFC', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', width: '100%' }}>
+                    {msg.content || '[Attachment]'}
+                  </div>
+                </div>
+              ))
+            )}
+          </div>
+        )}
+
         {/* AI Copilot Section */}
         <div className="sidebar-section" style={{ marginTop: 4 }}>
           <div

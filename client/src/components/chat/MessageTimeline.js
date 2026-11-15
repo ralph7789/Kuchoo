@@ -7,7 +7,13 @@ export default function MessageTimeline({
   currentUserId,
   allUsers = [],
   messagesEndRef,
-  activeTarget
+  activeTarget,
+  isAdmin = false,
+  onOpenThread,
+  onToggleReaction,
+  onPinMessage,
+  onEditMessage,
+  onDeleteMessage
 }) {
   if (messages.length === 0) {
     return (
@@ -43,6 +49,13 @@ export default function MessageTimeline({
             message={msg}
             isSelf={isSelf}
             senderUser={senderUser}
+            currentUserId={currentUserId}
+            isAdmin={isAdmin}
+            onOpenThread={onOpenThread}
+            onToggleReaction={onToggleReaction}
+            onPinMessage={onPinMessage}
+            onEditMessage={onEditMessage}
+            onDeleteMessage={onDeleteMessage}
           />
         );
       })}

@@ -25,6 +25,7 @@ import FloatingCallDock from './components/call/FloatingCallDock';
 import IncomingCallToast from './components/call/IncomingCallToast';
 import CreateChannelModal from './components/modals/CreateChannelModal';
 import UserProfileModal from './components/modals/UserProfileModal';
+import ThreadPane from './components/chat/ThreadPane';
 
 // Admin Dashboard
 import AdminDashboard from './AdminDashboard';
@@ -209,7 +210,15 @@ function Workspace({
   callUserId,
   localStream,
   remoteStream,
-  messagesEndRef
+  messagesEndRef,
+  activeThread,
+  setActiveThread,
+  pinnedMessages,
+  handleToggleReaction,
+  handleSendThreadReply,
+  handleEditMessage,
+  handleDeleteMessage,
+  handlePinMessage
 }) {
   const navigate = useNavigate();
   const [activeView, setActiveView] = useState('chats');
@@ -291,6 +300,12 @@ function Workspace({
           allUsers={users}
           messagesEndRef={messagesEndRef}
           activeTarget={activeTarget}
+          isAdmin={isAdmin}
+          onOpenThread={targetMsg => setActiveThread(targetMsg)}
+          onToggleReaction={handleToggleReaction}
+          onPinMessage={handlePinMessage}
+          onEditMessage={handleEditMessage}
+          onDeleteMessage={handleDeleteMessage}
         />
 
         {/* Typing Indicator */}
@@ -309,17 +324,32 @@ function Workspace({
         />
       </main>
 
-      {/* 4. Collapsible Inspector Pane (280px) */}
-      {inspectorOpen && activeTarget && (
-        <InspectorPane
-          activeTarget={activeTarget}
-          userStatus={userStatus}
+      {/* 4. Collapsible Inspector Pane or Thread Side-Panel (Slack/Teams Parity) */}
+      {activeThread ? (
+        <ThreadPane
+          parentMessage={activeThread}
+          onClose={() => setActiveThread(null)}
+          currentUserId={user?._id}
           allUsers={users}
-          onClose={() => setInspectorOpen(false)}
-          onStartAudioCall={userId => startCall(userId, false)}
-          onStartVideoCall={userId => startCall(userId, true)}
-          sharedFiles={sharedFiles}
+          onSendReply={handleSendThreadReply}
+          onToggleReaction={handleToggleReaction}
+          socket={socket}
+          backendUrl={BACKEND_URL}
         />
+      ) : (
+        inspectorOpen && activeTarget && (
+          <InspectorPane
+            activeTarget={activeTarget}
+            userStatus={userStatus}
+            allUsers={users}
+            onClose={() => setInspectorOpen(false)}
+            onStartAudioCall={userId => startCall(userId, false)}
+            onStartVideoCall={userId => startCall(userId, true)}
+            sharedFiles={sharedFiles}
+            pinnedMessages={pinnedMessages}
+            onUnpinMessage={handlePinMessage}
+          />
+        )
       )}
 
       {/* 5. Floating Picture-in-Picture Call Dock */}
@@ -369,6 +399,8 @@ function App() {
   const [groups, setGroups] = useState([]);
   const [messages, setMessages] = useState([]);
   const [activeTarget, setActiveTarget] = useState(null); // { type, id, name }
+  const [activeThread, setActiveThread] = useState(null); // Parent message object for open thread
+  const [pinnedMessages, setPinnedMessages] = useState([]);
   const [content, setContent] = useState('');
   const [authMode, setAuthMode] = useState('login'); // 'login' | 'signup'
   const [loginForm, setLoginForm] = useState({ email: '', password: '' });
@@ -436,7 +468,7 @@ function App() {
     };
   }, [user]);
 
-  // Load Messages When Active Target Changes
+  // Load Messages & Pins When Active Target Changes
   useEffect(() => {
     if (user && activeTarget) {
       const targetId = activeTarget.id;
@@ -448,17 +480,53 @@ function App() {
         })
         .catch(() => {});
 
+      fetch(`${BACKEND_URL}/api/pins/${targetId}`, { credentials: 'include' })
+        .then(res => res.json())
+        .then(data => {
+          if (Array.isArray(data)) setPinnedMessages(data);
+        })
+        .catch(() => {});
+
       // Join room for this target (user ID or group ID)
       socket.emit('join', targetId);
       socket.emit('join', user._id);
+    } else {
+      setPinnedMessages([]);
     }
   }, [user, activeTarget]);
 
-  // Socket.IO Listeners
+  // Socket.IO Real-Time Listeners (Slack/Teams parity)
   useEffect(() => {
     const handleReceiveMessage = (msg) => {
-      // Append if relevant to current view
-      setMessages(prev => [...prev, msg]);
+      setMessages(prev => {
+        if (prev.some(m => m._id === msg._id)) return prev;
+        return [...prev, msg];
+      });
+    };
+
+    const handleMessageUpdated = (updatedMsg) => {
+      setMessages(prev => prev.map(m => m._id === updatedMsg._id ? updatedMsg : m));
+      setActiveThread(prev => (prev && prev._id === updatedMsg._id ? updatedMsg : prev));
+    };
+
+    const handleMessageDeleted = ({ messageId }) => {
+      setMessages(prev => prev.map(m => m._id === messageId ? { ...m, isDeleted: true, content: 'This message was deleted', fileUrl: null, voiceUrl: null } : m));
+      setActiveThread(prev => (prev && prev._id === messageId ? { ...prev, isDeleted: true, content: 'This message was deleted' } : prev));
+    };
+
+    const handleMessageReaction = ({ messageId, reactions }) => {
+      setMessages(prev => prev.map(m => m._id === messageId ? { ...m, reactions } : m));
+      setActiveThread(prev => (prev && prev._id === messageId ? { ...prev, reactions } : prev));
+    };
+
+    const handleMessagePinned = ({ messageId, isPinned, pinnedBy, pinnedAt }) => {
+      setMessages(prev => prev.map(m => m._id === messageId ? { ...m, isPinned, pinnedBy, pinnedAt } : m));
+      if (activeTarget) {
+        fetch(`${BACKEND_URL}/api/pins/${activeTarget.id}`, { credentials: 'include' })
+          .then(res => res.json())
+          .then(data => { if (Array.isArray(data)) setPinnedMessages(data); })
+          .catch(() => {});
+      }
     };
 
     const handleUserStatus = ({ userId, online }) => {
@@ -466,13 +534,21 @@ function App() {
     };
 
     socket.on('receive_message', handleReceiveMessage);
+    socket.on('message_updated', handleMessageUpdated);
+    socket.on('message_deleted', handleMessageDeleted);
+    socket.on('message_reaction', handleMessageReaction);
+    socket.on('message_pinned', handleMessagePinned);
     socket.on('user_status', handleUserStatus);
 
     return () => {
       socket.off('receive_message', handleReceiveMessage);
+      socket.off('message_updated', handleMessageUpdated);
+      socket.off('message_deleted', handleMessageDeleted);
+      socket.off('message_reaction', handleMessageReaction);
+      socket.off('message_pinned', handleMessagePinned);
       socket.off('user_status', handleUserStatus);
     };
-  }, []);
+  }, [activeTarget]);
 
   // Auto-scroll timeline on new message
   useEffect(() => {
@@ -510,6 +586,70 @@ function App() {
       content: content.trim()
     });
     setContent('');
+  };
+
+  // Reaction, Thread, Pin, Edit, and Delete Handlers (Slack/Teams parity)
+  const handleToggleReaction = async (messageId, emoji) => {
+    if (!user) return;
+    try {
+      await fetch(`${BACKEND_URL}/api/messages/${messageId}/reactions`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ emoji })
+      });
+    } catch (err) {
+      console.error('Failed to toggle reaction:', err);
+    }
+  };
+
+  const handleSendThreadReply = async (parentId, replyText) => {
+    if (!user || !activeTarget || !replyText.trim()) return;
+    try {
+      await fetch(`${BACKEND_URL}/api/messages/${parentId}/threads`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ content: replyText.trim() })
+      });
+    } catch (err) {
+      console.error('Failed to send thread reply:', err);
+    }
+  };
+
+  const handleEditMessage = async (messageId, content) => {
+    try {
+      await fetch(`${BACKEND_URL}/api/messages/${messageId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ content })
+      });
+    } catch (err) {
+      console.error('Failed to edit message:', err);
+    }
+  };
+
+  const handleDeleteMessage = async (messageId) => {
+    try {
+      await fetch(`${BACKEND_URL}/api/messages/${messageId}`, {
+        method: 'DELETE',
+        credentials: 'include'
+      });
+    } catch (err) {
+      console.error('Failed to delete message:', err);
+    }
+  };
+
+  const handlePinMessage = async (messageId) => {
+    try {
+      await fetch(`${BACKEND_URL}/api/messages/${messageId}/pin`, {
+        method: 'POST',
+        credentials: 'include'
+      });
+    } catch (err) {
+      console.error('Failed to pin message:', err);
+    }
   };
 
   // Auth Handlers
@@ -748,6 +888,14 @@ function App() {
                 localStream={localStream}
                 remoteStream={remoteStream}
                 messagesEndRef={messagesEndRef}
+                activeThread={activeThread}
+                setActiveThread={setActiveThread}
+                pinnedMessages={pinnedMessages}
+                handleToggleReaction={handleToggleReaction}
+                handleSendThreadReply={handleSendThreadReply}
+                handleEditMessage={handleEditMessage}
+                handleDeleteMessage={handleDeleteMessage}
+                handlePinMessage={handlePinMessage}
               />
             )
           }

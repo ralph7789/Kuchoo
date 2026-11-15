@@ -20,19 +20,8 @@ const jwt = require('jsonwebtoken');
 // Load Mongoose models
 const User = require('./models/User');
 const Group = require('./models/Group');
+const Message = require('./models/Message');
 
-// Message Schema
-const messageSchema = new mongoose.Schema({
-  from: { type: String, required: true },
-  to: { type: String, required: true }, // groupId or userId
-  content: { type: String, default: '' },
-  timestamp: { type: Date, default: Date.now },
-  read: { type: Boolean, default: false },
-  fileUrl: { type: String, default: null },
-  voiceUrl: { type: String, default: null },
-  group: { type: Boolean, default: false }
-});
-const Message = mongoose.models.Message || mongoose.model('Message', messageSchema);
 
 const app = express();
 const server = http.createServer(app);
@@ -427,28 +416,264 @@ app.post('/api/profile', requireAuth, async (req, res) => {
 // ==========================================
 // Messaging & Upload APIs
 // ==========================================
+function sendProblem(res, status, title, detail) {
+  return res.status(status).contentType('application/problem+json').json({
+    type: 'about:blank',
+    title,
+    status,
+    detail,
+    instance: res.req ? res.req.originalUrl : undefined
+  });
+}
+
+// Main conversation timeline (excludes nested thread replies for clean Slack/Teams view)
 app.get('/api/messages/:user1/:user2', requireAuth, async (req, res) => {
-  const { user1, user2 } = req.params;
-  const isGroup = await Group.exists({ _id: user2 }).catch(() => false);
-  const query = isGroup
-    ? { to: user2 }
-    : {
-        $or: [
-          { from: user1, to: user2 },
-          { from: user2, to: user1 }
-        ]
-      };
-  const messages = await Message.find(query).sort('timestamp');
-  res.json(messages);
+  try {
+    const { user1, user2 } = req.params;
+    const isGroup = await Group.exists({ _id: user2 }).catch(() => false);
+    const rootCondition = {
+      $or: [{ parentId: null }, { parentId: { $exists: false } }]
+    };
+    const query = isGroup
+      ? { to: user2, ...rootCondition }
+      : {
+          $and: [
+            rootCondition,
+            {
+              $or: [
+                { from: user1, to: user2 },
+                { from: user2, to: user1 }
+              ]
+            }
+          ]
+        };
+    const messages = await Message.find(query).sort('timestamp');
+    res.json(messages);
+  } catch (err) {
+    sendProblem(res, 500, 'Internal Server Error', err.message);
+  }
+});
+
+// Thread replies API (Slack/Teams side-panel parity)
+app.get('/api/messages/:id/threads', requireAuth, async (req, res) => {
+  try {
+    const parent = await Message.findById(req.params.id);
+    if (!parent) return sendProblem(res, 404, 'Not Found', 'Parent message not found');
+    const replies = await Message.find({ parentId: req.params.id }).sort('timestamp');
+    res.json({ parent, replies });
+  } catch (err) {
+    sendProblem(res, 500, 'Internal Server Error', err.message);
+  }
+});
+
+app.post('/api/messages/:id/threads', requireAuth, async (req, res) => {
+  try {
+    const { content, fileUrl, voiceUrl } = req.body;
+    if (!content && !fileUrl && !voiceUrl) {
+      return sendProblem(res, 400, 'Bad Request', 'Reply content or attachment is required');
+    }
+    const parent = await Message.findById(req.params.id);
+    if (!parent) return sendProblem(res, 404, 'Not Found', 'Parent message not found');
+
+    const reply = await Message.create({
+      from: req.user._id.toString(),
+      to: parent.to,
+      content: content || '',
+      fileUrl: fileUrl || null,
+      voiceUrl: voiceUrl || null,
+      parentId: parent._id,
+      group: parent.group
+    });
+
+    parent.replyCount = (parent.replyCount || 0) + 1;
+    parent.lastReplyAt = new Date();
+    await parent.save();
+
+    io.to(parent.to).to(req.user._id.toString()).emit('thread_reply', { parentId: parent._id, reply });
+    io.to(parent.to).to(req.user._id.toString()).emit('message_updated', parent);
+
+    if (content && (content.toLowerCase().startsWith('@aladin') || content.toLowerCase().includes('@aladin'))) {
+      handleAladinBotReply(parent.to, content, req.user._id.toString(), parent._id);
+    }
+
+    res.status(201).json(reply);
+  } catch (err) {
+    sendProblem(res, 500, 'Internal Server Error', err.message);
+  }
+});
+
+// Emoji reaction toggle endpoint
+app.post('/api/messages/:id/reactions', requireAuth, async (req, res) => {
+  try {
+    const { emoji } = req.body;
+    if (!emoji || typeof emoji !== 'string') {
+      return sendProblem(res, 400, 'Bad Request', 'Emoji symbol is required');
+    }
+    const message = await Message.findById(req.params.id);
+    if (!message) return sendProblem(res, 404, 'Not Found', 'Message not found');
+
+    const userId = req.user._id.toString();
+    if (!Array.isArray(message.reactions)) message.reactions = [];
+    const existing = message.reactions.find(r => r.emoji === emoji);
+
+    if (existing) {
+      const idx = existing.users.indexOf(userId);
+      if (idx > -1) {
+        existing.users.splice(idx, 1);
+        if (existing.users.length === 0) {
+          message.reactions = message.reactions.filter(r => r.emoji !== emoji);
+        }
+      } else {
+        existing.users.push(userId);
+      }
+    } else {
+      message.reactions.push({ emoji, users: [userId] });
+    }
+
+    await message.save();
+    io.to(message.to).to(message.from).emit('message_reaction', {
+      messageId: message._id,
+      reactions: message.reactions
+    });
+    res.json({ messageId: message._id, reactions: message.reactions });
+  } catch (err) {
+    sendProblem(res, 500, 'Internal Server Error', err.message);
+  }
+});
+
+// Message Edit endpoint
+app.patch('/api/messages/:id', requireAuth, async (req, res) => {
+  try {
+    const { content } = req.body;
+    if (typeof content !== 'string' || !content.trim()) {
+      return sendProblem(res, 400, 'Bad Request', 'Valid content string required');
+    }
+    const message = await Message.findById(req.params.id);
+    if (!message) return sendProblem(res, 404, 'Not Found', 'Message not found');
+
+    const isAuthor = message.from === req.user._id.toString();
+    const isAdmin = req.user.isAdmin || req.user.roles?.includes('admin');
+    if (!isAuthor && !isAdmin) {
+      return sendProblem(res, 403, 'Forbidden', 'Not authorized to edit this message');
+    }
+
+    message.content = content.trim();
+    message.isEdited = true;
+    message.editedAt = new Date();
+    await message.save();
+
+    io.to(message.to).to(message.from).emit('message_updated', message);
+    res.json(message);
+  } catch (err) {
+    sendProblem(res, 500, 'Internal Server Error', err.message);
+  }
+});
+
+// Message Soft-Delete endpoint (preserves audit integrity)
+app.delete('/api/messages/:id', requireAuth, async (req, res) => {
+  try {
+    const message = await Message.findById(req.params.id);
+    if (!message) return sendProblem(res, 404, 'Not Found', 'Message not found');
+
+    const isAuthor = message.from === req.user._id.toString();
+    const isAdmin = req.user.isAdmin || req.user.roles?.includes('admin');
+    if (!isAuthor && !isAdmin) {
+      return sendProblem(res, 403, 'Forbidden', 'Not authorized to delete this message');
+    }
+
+    message.isDeleted = true;
+    message.deletedAt = new Date();
+    message.content = 'This message was deleted';
+    message.fileUrl = null;
+    message.voiceUrl = null;
+    await message.save();
+
+    io.to(message.to).to(message.from).emit('message_deleted', {
+      messageId: message._id,
+      to: message.to,
+      isDeleted: true
+    });
+    res.json({ success: true, messageId: message._id });
+  } catch (err) {
+    sendProblem(res, 500, 'Internal Server Error', err.message);
+  }
+});
+
+// Pinned Message toggle endpoint
+app.post('/api/messages/:id/pin', requireAuth, async (req, res) => {
+  try {
+    const message = await Message.findById(req.params.id);
+    if (!message) return sendProblem(res, 404, 'Not Found', 'Message not found');
+
+    message.isPinned = !message.isPinned;
+    if (message.isPinned) {
+      message.pinnedBy = req.user.displayName || req.user.email;
+      message.pinnedAt = new Date();
+    } else {
+      message.pinnedBy = null;
+      message.pinnedAt = null;
+    }
+    await message.save();
+
+    io.to(message.to).to(message.from).emit('message_pinned', {
+      messageId: message._id,
+      isPinned: message.isPinned,
+      pinnedBy: message.pinnedBy,
+      pinnedAt: message.pinnedAt
+    });
+    res.json(message);
+  } catch (err) {
+    sendProblem(res, 500, 'Internal Server Error', err.message);
+  }
+});
+
+// Fetch Pinned Messages for conversation
+app.get('/api/pins/:targetId', requireAuth, async (req, res) => {
+  try {
+    const pins = await Message.find({
+      to: req.params.targetId,
+      isPinned: true,
+      isDeleted: { $ne: true }
+    }).sort({ pinnedAt: -1 });
+    res.json(pins);
+  } catch (err) {
+    sendProblem(res, 500, 'Internal Server Error', err.message);
+  }
+});
+
+// Universal Full-Text Search endpoint (Slack/Teams parity)
+app.get('/api/search', requireAuth, async (req, res) => {
+  try {
+    const { q, targetId } = req.query;
+    if (!q || typeof q !== 'string' || !q.trim()) {
+      return res.json([]);
+    }
+    const cleanQuery = q.trim();
+    const filter = {
+      isDeleted: { $ne: true },
+      $or: [
+        { content: { $regex: cleanQuery, $options: 'i' } },
+        { fileUrl: { $regex: cleanQuery, $options: 'i' } }
+      ]
+    };
+    if (targetId) filter.to = targetId;
+
+    const matches = await Message.find(filter)
+      .sort({ timestamp: -1 })
+      .limit(30);
+    res.json(matches);
+  } catch (err) {
+    sendProblem(res, 500, 'Internal Server Error', err.message);
+  }
 });
 
 app.post('/api/upload', requireAuth, upload.single('file'), (req, res) => {
-  if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
+  if (!req.file) return sendProblem(res, 400, 'Bad Request', 'No file uploaded');
   res.json({ url: `/uploads/${req.file.filename}` });
 });
 
 app.post('/api/voice', requireAuth, upload.single('voice'), (req, res) => {
-  if (!req.file) return res.status(400).json({ error: 'No audio recorded' });
+  if (!req.file) return sendProblem(res, 400, 'Bad Request', 'No audio recorded');
   res.json({ url: `/uploads/${req.file.filename}` });
 });
 
@@ -524,7 +749,7 @@ app.delete('/api/groups/:id', requireAuth, requireAdmin, async (req, res) => {
 // ==========================================
 // Aladin AI Copilot Bot Helper
 // ==========================================
-async function handleAladinBotReply(roomOrTo, promptText, senderId) {
+async function handleAladinBotReply(roomOrTo, promptText, senderId, parentId = null) {
   try {
     let aladinUser = await User.findOne({ email: 'aladin@xcorp.internal' });
     if (!aladinUser) {
@@ -563,9 +788,22 @@ async function handleAladinBotReply(roomOrTo, promptText, senderId) {
       const aiMessage = await Message.create({
         from: aladinUser._id.toString(),
         to: roomOrTo,
-        content: `🤖 **Aladin AI**: ${aiReply}`
+        content: `🤖 **Aladin AI**: ${aiReply}`,
+        parentId: parentId || null
       });
-      io.to(roomOrTo).to(senderId).emit('receive_message', aiMessage);
+
+      if (parentId) {
+        const parent = await Message.findById(parentId);
+        if (parent) {
+          parent.replyCount = (parent.replyCount || 0) + 1;
+          parent.lastReplyAt = new Date();
+          await parent.save();
+          io.to(roomOrTo).to(senderId).emit('thread_reply', { parentId, reply: aiMessage });
+          io.to(roomOrTo).to(senderId).emit('message_updated', parent);
+        }
+      } else {
+        io.to(roomOrTo).to(senderId).emit('receive_message', aiMessage);
+      }
     }
   } catch (err) {
     console.warn('Aladin bot execution error:', err.message);
@@ -632,13 +870,109 @@ io.on('connection', (socket) => {
   });
 
   socket.on('send_message', async (data) => {
-    const { from, to, content, fileUrl, voiceUrl } = data;
-    const message = await Message.create({ from, to, content, fileUrl, voiceUrl });
-    io.to(to).to(from).emit('receive_message', message);
+    const { from, to, content, fileUrl, voiceUrl, parentId } = data;
+    if (parentId) {
+      const parent = await Message.findById(parentId);
+      if (parent) {
+        const reply = await Message.create({
+          from,
+          to: parent.to,
+          content: content || '',
+          fileUrl: fileUrl || null,
+          voiceUrl: voiceUrl || null,
+          parentId: parent._id,
+          group: parent.group
+        });
+        parent.replyCount = (parent.replyCount || 0) + 1;
+        parent.lastReplyAt = new Date();
+        await parent.save();
 
-    // Aladin AI Assistant copilot hook
-    if (content && (content.toLowerCase().startsWith('@aladin') || content.toLowerCase().includes('@aladin'))) {
-      handleAladinBotReply(to, content, from);
+        io.to(parent.to).to(from).emit('thread_reply', { parentId: parent._id, reply });
+        io.to(parent.to).to(from).emit('message_updated', parent);
+
+        if (content && (content.toLowerCase().startsWith('@aladin') || content.toLowerCase().includes('@aladin'))) {
+          handleAladinBotReply(parent.to, content, from, parent._id);
+        }
+      }
+    } else {
+      const message = await Message.create({ from, to, content, fileUrl, voiceUrl });
+      io.to(to).to(from).emit('receive_message', message);
+
+      // Aladin AI Assistant copilot hook
+      if (content && (content.toLowerCase().startsWith('@aladin') || content.toLowerCase().includes('@aladin'))) {
+        handleAladinBotReply(to, content, from);
+      }
+    }
+  });
+
+  socket.on('message_reaction', async ({ messageId, emoji, from }) => {
+    try {
+      const message = await Message.findById(messageId);
+      if (!message || !emoji) return;
+      if (!Array.isArray(message.reactions)) message.reactions = [];
+      let existingReaction = message.reactions.find(r => r.emoji === emoji);
+
+      if (existingReaction) {
+        const idx = existingReaction.users.indexOf(from);
+        if (idx > -1) {
+          existingReaction.users.splice(idx, 1);
+          if (existingReaction.users.length === 0) {
+            message.reactions = message.reactions.filter(r => r.emoji !== emoji);
+          }
+        } else {
+          existingReaction.users.push(from);
+        }
+      } else {
+        message.reactions.push({ emoji, users: [from] });
+      }
+
+      await message.save();
+      io.to(message.to).to(message.from).emit('message_reaction', {
+        messageId: message._id,
+        reactions: message.reactions
+      });
+    } catch (e) {
+      console.warn('Socket message_reaction error:', e.message);
+    }
+  });
+
+  socket.on('edit_message', async ({ messageId, content, from }) => {
+    try {
+      const message = await Message.findById(messageId);
+      if (!message || !content) return;
+      if (message.from !== from) return; // author check
+
+      message.content = content.trim();
+      message.isEdited = true;
+      message.editedAt = new Date();
+      await message.save();
+
+      io.to(message.to).to(message.from).emit('message_updated', message);
+    } catch (e) {
+      console.warn('Socket edit_message error:', e.message);
+    }
+  });
+
+  socket.on('delete_message', async ({ messageId, from }) => {
+    try {
+      const message = await Message.findById(messageId);
+      if (!message) return;
+      if (message.from !== from) return;
+
+      message.isDeleted = true;
+      message.deletedAt = new Date();
+      message.content = 'This message was deleted';
+      message.fileUrl = null;
+      message.voiceUrl = null;
+      await message.save();
+
+      io.to(message.to).to(message.from).emit('message_deleted', {
+        messageId: message._id,
+        to: message.to,
+        isDeleted: true
+      });
+    } catch (e) {
+      console.warn('Socket delete_message error:', e.message);
     }
   });
 
