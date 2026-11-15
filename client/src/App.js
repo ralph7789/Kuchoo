@@ -327,6 +327,7 @@ function Workspace({
           onStartRecording={startRecording}
           onStopRecording={stopRecording}
           onTriggerAladin={() => setContent(c => c ? `${c} @aladin ` : '@aladin ')}
+          users={users}
         />
       </main>
 
@@ -354,6 +355,7 @@ function Workspace({
             sharedFiles={sharedFiles}
             pinnedMessages={pinnedMessages}
             onUnpinMessage={handlePinMessage}
+            onSelectTarget={target => setActiveTarget(target)}
           />
         )
       )}
@@ -559,12 +561,30 @@ function App() {
       setUserStatus(prev => ({ ...prev, [userId]: online }));
     };
 
+    const handleUserMention = ({ message }) => {
+      if (user?.dnd) return;
+      if (typeof Notification !== 'undefined' && Notification.permission === 'granted') {
+        try {
+          new Notification('New @mention in Kuchoo', {
+            body: message?.content || 'You were mentioned in a conversation',
+            icon: '/favicon.ico'
+          });
+        } catch (e) {}
+      }
+    };
+
+    const handleUserStatusUpdated = (statusPayload) => {
+      setUsers(prev => prev.map(u => u._id === statusPayload.userId ? { ...u, customStatus: statusPayload.customStatus, dnd: statusPayload.dnd } : u));
+    };
+
     socket.on('receive_message', handleReceiveMessage);
     socket.on('message_updated', handleMessageUpdated);
     socket.on('message_deleted', handleMessageDeleted);
     socket.on('message_reaction', handleMessageReaction);
     socket.on('message_pinned', handleMessagePinned);
     socket.on('user_status', handleUserStatus);
+    socket.on('user_mention', handleUserMention);
+    socket.on('user_status_updated', handleUserStatusUpdated);
 
     return () => {
       socket.off('receive_message', handleReceiveMessage);
@@ -573,8 +593,10 @@ function App() {
       socket.off('message_reaction', handleMessageReaction);
       socket.off('message_pinned', handleMessagePinned);
       socket.off('user_status', handleUserStatus);
+      socket.off('user_mention', handleUserMention);
+      socket.off('user_status_updated', handleUserStatusUpdated);
     };
-  }, [activeTarget]);
+  }, [activeTarget, user]);
 
   // Auto-scroll timeline on new message
   useEffect(() => {
@@ -717,12 +739,12 @@ function App() {
     setMessages([]);
   };
 
-  const handleProfileUpdate = async ({ displayName, password }) => {
+  const handleProfileUpdate = async ({ displayName, password, customStatus, dnd }) => {
     const res = await fetch(`${BACKEND_URL}/api/profile`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       credentials: 'include',
-      body: JSON.stringify({ displayName, password })
+      body: JSON.stringify({ displayName, password, customStatus, dnd })
     });
     const data = await res.json();
     if (data.error) throw new Error(data.error);

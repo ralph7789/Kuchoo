@@ -10,8 +10,18 @@ const userSchema = new mongoose.Schema({
   isAdmin: { type: Boolean, default: false },
   online: { type: Boolean, default: false },
   lastSeen: { type: Date, default: Date.now },
+
+  // Slack/Teams Status & Notification Invariants
+  customStatus: {
+    text: { type: String, default: '' },
+    emoji: { type: String, default: '' },
+    clearAfter: { type: Date, default: null }
+  },
+  dnd: { type: Boolean, default: false }, // Do Not Disturb
+
   createdAt: { type: Date, default: Date.now }
 });
 
-module.exports = mongoose.model('User', userSchema);
+module.exports = mongoose.models.User || mongoose.model('User', userSchema);
+
 

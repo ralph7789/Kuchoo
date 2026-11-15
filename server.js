@@ -405,12 +405,60 @@ app.get('/api/users', requireAuth, async (req, res) => {
 });
 
 app.post('/api/profile', requireAuth, async (req, res) => {
-  const { displayName, password } = req.body;
-  const update = {};
-  if (displayName) update.displayName = displayName;
-  if (password) update.password = await bcrypt.hash(password, 10);
-  const user = await User.findByIdAndUpdate(req.user._id, update, { new: true });
-  res.json(user);
+  try {
+    const { displayName, password, customStatus, dnd } = req.body;
+    const update = {};
+    if (displayName) update.displayName = displayName.trim();
+    if (password) update.password = await bcrypt.hash(password, 10);
+    if (customStatus !== undefined) update.customStatus = customStatus;
+    if (dnd !== undefined) update.dnd = Boolean(dnd);
+
+    const user = await User.findByIdAndUpdate(req.user._id, update, { new: true });
+    // Broadcast status change to real-time subscribers
+    io.emit('user_status_updated', {
+      userId: user._id,
+      displayName: user.displayName,
+      customStatus: user.customStatus,
+      dnd: user.dnd
+    });
+    res.json(user);
+  } catch (err) {
+    sendProblem(res, 500, 'Internal Server Error', err.message);
+  }
+});
+
+// Activity Tray: Mentions & Alerts Feed (Slack/Teams parity)
+app.get('/api/activity/mentions', requireAuth, async (req, res) => {
+  try {
+    const user = req.user;
+    const escapedName = user.displayName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const userGroups = await Group.find({
+      $or: [
+        { members: user._id },
+        { createdBy: user._id }
+      ]
+    }).select('_id');
+    const groupIds = userGroups.map(g => g._id.toString());
+
+    const mentionRegex = new RegExp(`@(${escapedName}|channel|here)`, 'i');
+
+    const query = {
+      isDeleted: { $ne: true },
+      $or: [
+        { to: user._id.toString() }, // direct messages
+        { to: { $in: groupIds }, content: { $regex: mentionRegex } },
+        { content: { $regex: new RegExp(`@${escapedName}`, 'i') } }
+      ]
+    };
+
+    const mentions = await Message.find(query)
+      .sort({ timestamp: -1 })
+      .limit(50);
+
+    res.json(mentions);
+  } catch (err) {
+    sendProblem(res, 500, 'Internal Server Error', err.message);
+  }
 });
 
 // ==========================================
@@ -1007,6 +1055,27 @@ io.on('connection', (socket) => {
       }
     }
 
+    async function processMentions(messageDoc, text, senderId) {
+      if (!text || typeof text !== 'string') return;
+      const mentionMatches = text.match(/@([\w.-]+)/g);
+      if (!mentionMatches || mentionMatches.length === 0) return;
+
+      const names = mentionMatches.map(m => m.slice(1).toLowerCase());
+      const allUsers = await User.find({}).select('_id displayName email dnd');
+      for (const u of allUsers) {
+        if (u._id.toString() === senderId.toString()) continue;
+        const matchesUser = names.includes(u.displayName.toLowerCase()) || names.includes(u.email.toLowerCase());
+        const isBroadcast = names.includes('channel') || names.includes('here');
+        if ((matchesUser || isBroadcast) && !u.dnd) {
+          io.to(u._id.toString()).emit('user_mention', {
+            message: messageDoc,
+            mentionedBy: senderId,
+            type: isBroadcast ? 'broadcast' : 'direct'
+          });
+        }
+      }
+    }
+
     if (parentId) {
       const parent = await Message.findById(parentId);
       if (parent) {
@@ -1026,6 +1095,8 @@ io.on('connection', (socket) => {
         io.to(parent.to).to(from).emit('thread_reply', { parentId: parent._id, reply });
         io.to(parent.to).to(from).emit('message_updated', parent);
 
+        processMentions(reply, content, from);
+
         if (content && (content.toLowerCase().startsWith('@aladin') || content.toLowerCase().includes('@aladin'))) {
           handleAladinBotReply(parent.to, content, from, parent._id);
         }
@@ -1033,6 +1104,8 @@ io.on('connection', (socket) => {
     } else {
       const message = await Message.create({ from, to, content, fileUrl, voiceUrl });
       io.to(to).to(from).emit('receive_message', message);
+
+      processMentions(message, content, from);
 
       // Aladin AI Assistant copilot hook
       if (content && (content.toLowerCase().startsWith('@aladin') || content.toLowerCase().includes('@aladin'))) {
