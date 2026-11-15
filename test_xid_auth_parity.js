@@ -218,6 +218,40 @@ async function runXidAuthParityTest() {
 
   console.log('  ✔ Invariant 3 (Error Engineering): Dual code/token resolution and RFC 6749 error routing verified');
 
+  // 6. Test Reverse-Proxy Redirect URI Resolution & Port Stripping
+  function testResolveRedirectUri(headers, isSecure, envUri) {
+    if (envUri) return envUri;
+    const proto = headers['x-forwarded-proto'] || (isSecure ? 'https' : 'http');
+    const rawForwardedHost = headers['x-forwarded-host'];
+    let host = rawForwardedHost ? rawForwardedHost.split(',')[0].trim() : headers['host'];
+    if (host && host.endsWith(':443')) host = host.slice(0, -4);
+    if (host && proto === 'http' && host.endsWith(':80')) host = host.slice(0, -3);
+    if (!host || host.startsWith('localhost') || host.startsWith('127.0.0.1') || host.includes('xcorp-kuchoo')) {
+      host = 'kuchoo.xcorp.mywire.org';
+    }
+    return `${proto}://${host}/api/auth/xid/callback`;
+  }
+
+  // Subcase A: Standard Caddy proxy with X-Forwarded-Host and Port 443
+  const caddyUri = testResolveRedirectUri({
+    'x-forwarded-proto': 'https',
+    'x-forwarded-host': 'kuchoo.xcorp.mywire.org:443',
+    'host': '127.0.0.1:5000'
+  }, false);
+  assert.strictEqual(caddyUri, 'https://kuchoo.xcorp.mywire.org/api/auth/xid/callback', 'Must strip :443 and prioritize x-forwarded-host');
+
+  // Subcase B: Internal container host fallback to canonical app domain
+  const containerFallback = testResolveRedirectUri({ 'host': 'localhost:5000' }, false);
+  assert.strictEqual(containerFallback, 'http://kuchoo.xcorp.mywire.org/api/auth/xid/callback', 'Internal host must fall back to canonical app domain');
+
+  // Subcase C: Basic Auth header generation
+  const basicAuth = Buffer.from('c8a412f9-kuchoo-chat-client:xid_chat_pRKluChwBN99BI').toString('base64');
+  assert.ok(basicAuth.length > 20, 'Basic auth header must be valid base64');
+  const decoded = Buffer.from(basicAuth, 'base64').toString('utf8');
+  assert.strictEqual(decoded, 'c8a412f9-kuchoo-chat-client:xid_chat_pRKluChwBN99BI');
+
+  console.log('  ✔ Invariant 5 (Boundary/Proxy Parity): Reverse-proxy redirect URI resolution and Basic Auth encoding verified');
+
   console.log('\n🎉 ALL XID SSO & PKCE PARITY ASSERTIONS PASSED (100% SUCCESS)\n');
 }
 

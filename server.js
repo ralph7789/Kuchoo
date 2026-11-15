@@ -294,11 +294,29 @@ function cleanPkceStateCache() {
   }
 }
 
+function resolveRedirectUri(req) {
+  if (process.env.XID_REDIRECT_URI) {
+    return process.env.XID_REDIRECT_URI;
+  }
+  const proto = req.get('x-forwarded-proto') || (req.secure ? 'https' : 'http');
+  const rawForwardedHost = req.get('x-forwarded-host');
+  let host = rawForwardedHost ? rawForwardedHost.split(',')[0].trim() : req.get('host');
+  if (host && host.endsWith(':443')) {
+    host = host.slice(0, -4);
+  }
+  if (host && proto === 'http' && host.endsWith(':80')) {
+    host = host.slice(0, -3);
+  }
+  // Fallback if host is missing or an internal container/loopback address
+  if (!host || host.startsWith('localhost') || host.startsWith('127.0.0.1') || host.includes('xcorp-kuchoo')) {
+    host = 'kuchoo.xcorp.mywire.org';
+  }
+  return `${proto}://${host}/api/auth/xid/callback`;
+}
+
 app.get('/api/auth/xid/login', (req, res) => {
   cleanPkceStateCache();
-  const host = req.get('host') || 'chat.xcorp.mywire.org';
-  const proto = req.get('x-forwarded-proto') || (req.secure ? 'https' : 'http');
-  const redirectUri = `${proto}://${host}/api/auth/xid/callback`;
+  const redirectUri = resolveRedirectUri(req);
 
   // Generate cryptographically secure state, nonce, and PKCE S256 parameters
   const state = crypto.randomBytes(16).toString('hex');
@@ -306,13 +324,14 @@ app.get('/api/auth/xid/login', (req, res) => {
   const codeVerifier = crypto.randomBytes(32).toString('base64url');
   const codeChallenge = crypto.createHash('sha256').update(codeVerifier).digest('base64url');
 
-  // Store in session and fallback cache
+  // Store in session and fallback cache (including exact redirectUri for token exchange parity)
   if (req.session) {
+    req.session.xidRedirectUri = redirectUri;
     req.session.xidState = state;
     req.session.xidNonce = nonce;
     req.session.xidVerifier = codeVerifier;
   }
-  pkceStateCache.set(state, { verifier: codeVerifier, nonce, createdAt: Date.now() });
+  pkceStateCache.set(state, { verifier: codeVerifier, nonce, redirectUri, createdAt: Date.now() });
 
   const params = new URLSearchParams({
     client_id: XID_CLIENT_ID,
@@ -340,9 +359,9 @@ app.get('/api/auth/xid/login', (req, res) => {
 app.get('/api/auth/xid/callback', async (req, res) => {
   cleanPkceStateCache();
   const { code, token, auth_token, access_token, state, error, error_description } = req.query;
-  const host = req.get('host') || 'chat.xcorp.mywire.org';
-  const proto = req.get('x-forwarded-proto') || (req.secure ? 'https' : 'http');
-  const redirectUri = `${proto}://${host}/api/auth/xid/callback`;
+  const redirectUri = (req.session && req.session.xidRedirectUri) ||
+                      (state && pkceStateCache.get(state)?.redirectUri) ||
+                      resolveRedirectUri(req);
 
   if (error) {
     console.error(`[XID SSO] Provider error: ${error} - ${error_description || ''}`);
@@ -449,11 +468,15 @@ app.get('/api/auth/xid/callback', async (req, res) => {
         bodyParams.code_verifier = codeVerifier;
       }
 
+      const basicAuth = Buffer.from(`${XID_CLIENT_ID}:${XID_CLIENT_SECRET}`).toString('base64');
       for (const endpoint of tokenEndpoints) {
         try {
           const tokenRes = await fetch(endpoint, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            headers: {
+              'Content-Type': 'application/x-www-form-urlencoded',
+              'Authorization': `Basic ${basicAuth}`
+            },
             body: new URLSearchParams(bodyParams),
             signal: AbortSignal.timeout(5000)
           });

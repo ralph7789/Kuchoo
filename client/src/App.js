@@ -51,7 +51,10 @@ function AuthScreen({
   handleRegister,
   error
 }) {
+  const [isRedirecting, setIsRedirecting] = useState(false);
+
   const handleXIDLogin = () => {
+    setIsRedirecting(true);
     window.location.href = `${BACKEND_URL}/api/auth/xid/login`;
   };
 
@@ -73,9 +76,12 @@ function AuthScreen({
             type="button"
             className="auth-xid-btn"
             onClick={handleXIDLogin}
+            disabled={isRedirecting}
+            style={isRedirecting ? { opacity: 0.85, cursor: 'wait' } : {}}
+            aria-label="Sign in with Xcorp ID SSO"
           >
             <span style={{ fontSize: 18 }}>⚡</span>
-            <span>Sign in with Xcorp ID</span>
+            <span>{isRedirecting ? 'Connecting to XID SSO...' : 'Sign in with Xcorp ID'}</span>
           </button>
 
           <div className="auth-divider-row">
@@ -412,6 +418,7 @@ function Workspace({
 // Master Application Root
 function App() {
   const [user, setUser] = useState(null);
+  const [authLoading, setAuthLoading] = useState(true);
   const [users, setUsers] = useState([]);
   const [groups, setGroups] = useState([]);
   const [messages, setMessages] = useState([]);
@@ -519,7 +526,10 @@ function App() {
           setUser(data);
         }
       })
-      .catch(() => {});
+      .catch(() => {})
+      .finally(() => {
+        setAuthLoading(false);
+      });
   }, []);
 
   // Fetch Directory & Channels when User Authenticates
@@ -941,6 +951,27 @@ function App() {
     setCallUserId(null);
     setCallIncoming(null);
   };
+
+  if (authLoading) {
+    return (
+      <div className="auth-canvas" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: '100vh', background: 'var(--bg-app, #060910)' }}>
+        <div style={{ textAlign: 'center' }}>
+          <div style={{
+            width: 44,
+            height: 44,
+            border: '3px solid rgba(0, 240, 255, 0.15)',
+            borderTop: '3px solid #00F0FF',
+            borderRadius: '50%',
+            animation: 'kuchoo-spin 0.8s linear infinite',
+            margin: '0 auto 18px'
+          }} />
+          <div style={{ fontSize: 13, fontWeight: 700, letterSpacing: '0.08em', color: '#00F0FF' }}>
+            AUTHENTICATING KUCHOO...
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <Router>
