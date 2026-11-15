@@ -1,9 +1,10 @@
 {
-  "name": "messenger",
-  "version": "1.0.0",
+  "name": "kuchoo",
+  "version": "1.0.2",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start": "node server.js",
+    "test": "node test_milestone1_parity.js && node test_milestone2_parity.js && node test_milestone3_parity.js && node test_milestone4_parity.js && node test_milestone5_parity.js && node test_milestone6_parity.js && node test_xid_auth_parity.js && node test_xdb_parity.js"
   },
   "keywords": [],
   "author": "",
@@ -11,11 +12,11 @@
   "description": "",
   "dependencies": {
     "bcrypt": "^6.0.0",
-    "connect-mongo": "^5.1.0",
     "cors": "^2.8.5",
     "dotenv": "^16.5.0",
     "express": "^5.1.0",
     "express-session": "^1.18.1",
+    "jsonwebtoken": "^9.0.2",
     "mongoose": "^8.15.0",
     "multer": "^2.0.0",
     "passport": "^0.7.0",

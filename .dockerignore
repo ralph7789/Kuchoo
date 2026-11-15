@@ -1,0 +1,9 @@
+node_modules
+client/node_modules
+client/build
+uploads/*
+!uploads/.gitkeep
+.git
+.env
+Screenshots
+test_*.js
