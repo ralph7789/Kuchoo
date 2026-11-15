@@ -21,6 +21,8 @@ const jwt = require('jsonwebtoken');
 const User = require('./models/User');
 const Group = require('./models/Group');
 const Message = require('./models/Message');
+const Webhook = require('./models/Webhook');
+const AuditLog = require('./models/AuditLog');
 
 
 const app = express();
@@ -474,6 +476,25 @@ function sendProblem(res, status, title, detail) {
   });
 }
 
+// Enterprise Persistent Audit Logging Helper
+async function recordAuditLog(req, action, targetType, targetId, metadata = {}) {
+  try {
+    const rawIp = req?.headers?.['x-forwarded-for'] || req?.socket?.remoteAddress || '127.0.0.1';
+    const ipAddress = Array.isArray(rawIp) ? rawIp[0] : (typeof rawIp === 'string' ? rawIp.split(',')[0].trim() : '127.0.0.1');
+    const userId = req?.user?._id || null;
+    await AuditLog.create({
+      userId,
+      action,
+      targetType,
+      targetId: targetId ? targetId.toString() : null,
+      metadata,
+      ipAddress
+    });
+  } catch (err) {
+    console.error('AuditLog recording error:', err.message);
+  }
+}
+
 // Main conversation timeline (excludes nested thread replies for clean Slack/Teams view)
 app.get('/api/messages/:user1/:user2', requireAuth, async (req, res) => {
   try {
@@ -625,6 +646,8 @@ app.patch('/api/messages/:id', requireAuth, async (req, res) => {
     message.editedAt = new Date();
     await message.save();
 
+    await recordAuditLog(req, 'MESSAGE_EDITED', 'Message', message._id, { to: message.to });
+
     io.to(message.to).to(message.from).emit('message_updated', message);
     res.json(message);
   } catch (err) {
@@ -650,6 +673,8 @@ app.delete('/api/messages/:id', requireAuth, async (req, res) => {
     message.fileUrl = null;
     message.voiceUrl = null;
     await message.save();
+
+    await recordAuditLog(req, 'MESSAGE_DELETED', 'Message', message._id, { to: message.to });
 
     io.to(message.to).to(message.from).emit('message_deleted', {
       messageId: message._id,
@@ -766,6 +791,7 @@ app.post('/api/groups', requireAuth, async (req, res) => {
       moderators: [req.user._id],
       createdBy: req.user._id
     });
+    await recordAuditLog(req, 'CHANNEL_CREATED', 'Group', group._id, { name: group.name, isPrivate: group.isPrivate });
     res.json(group);
   } catch (err) {
     sendProblem(res, 500, 'Internal Server Error', err.message);
@@ -815,6 +841,7 @@ app.patch('/api/groups/:id', requireAuth, async (req, res) => {
     }
 
     await group.save();
+    await recordAuditLog(req, 'CHANNEL_UPDATED', 'Group', group._id, { name: group.name, topic: group.topic, isPrivate: group.isPrivate });
     res.json(group);
   } catch (err) {
     sendProblem(res, 500, 'Internal Server Error', err.message);
@@ -843,6 +870,7 @@ app.post('/api/groups/:id/members', requireAuth, async (req, res) => {
     if (!group.members.some(m => m.toString() === userId.toString())) {
       group.members.push(userId);
       await group.save();
+      await recordAuditLog(req, 'MEMBER_JOINED', 'Group', group._id, { addedUserId: userId });
     }
     const updated = await Group.findById(group._id).populate('members', 'displayName email avatar');
     res.json(updated);
@@ -871,6 +899,7 @@ app.delete('/api/groups/:id/members/:userId', requireAuth, async (req, res) => {
     group.members = group.members.filter(m => m.toString() !== targetUserIdStr);
     group.moderators = group.moderators.filter(m => m.toString() !== targetUserIdStr);
     await group.save();
+    await recordAuditLog(req, 'MEMBER_KICKED', 'Group', group._id, { removedUserId: targetUserIdStr });
     res.json({ success: true, groupId: group._id, removedUserId: targetUserIdStr });
   } catch (err) {
     sendProblem(res, 500, 'Internal Server Error', err.message);
@@ -890,6 +919,7 @@ app.post('/api/users', requireAuth, requireAdmin, async (req, res) => {
     if (existing) return res.status(400).json({ error: 'Email already registered' });
     const hashed = password ? await bcrypt.hash(password, 10) : undefined;
     const user = await User.create({ email, password: hashed, displayName, roles: roles || ['user'], isAdmin: Boolean(isAdmin) });
+    await recordAuditLog(req, 'USER_CREATED', 'User', user._id, { email: user.email, roles: user.roles });
     res.json(user);
   } catch (err) {
     res.status(500).json({ error: 'Failed to create user', details: err.message });
@@ -898,7 +928,10 @@ app.post('/api/users', requireAuth, requireAdmin, async (req, res) => {
 
 app.delete('/api/users/:id', requireAuth, requireAdmin, async (req, res) => {
   try {
-    await User.findByIdAndDelete(req.params.id);
+    const deletedUser = await User.findByIdAndDelete(req.params.id);
+    if (deletedUser) {
+      await recordAuditLog(req, 'USER_DELETED', 'User', req.params.id, { email: deletedUser.email });
+    }
     res.json({ success: true });
   } catch (err) {
     res.status(500).json({ error: 'Failed to delete user' });
@@ -907,10 +940,205 @@ app.delete('/api/users/:id', requireAuth, requireAdmin, async (req, res) => {
 
 app.delete('/api/groups/:id', requireAuth, requireAdmin, async (req, res) => {
   try {
-    await Group.findByIdAndDelete(req.params.id);
+    const deletedGroup = await Group.findByIdAndDelete(req.params.id);
+    if (deletedGroup) {
+      await recordAuditLog(req, 'CHANNEL_DELETED', 'Group', req.params.id, { name: deletedGroup.name });
+    }
     res.json({ success: true });
   } catch (err) {
     res.status(500).json({ error: 'Failed to delete group' });
+  }
+});
+
+app.patch('/api/users/:id/roles', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const { roles, isAdmin } = req.body;
+    const user = await User.findById(req.params.id);
+    if (!user) return sendProblem(res, 404, 'Not Found', 'User not found');
+    if (Array.isArray(roles)) user.roles = roles;
+    if (isAdmin !== undefined) user.isAdmin = Boolean(isAdmin);
+    await user.save();
+    await recordAuditLog(req, 'ROLE_CHANGED', 'User', user._id, { roles: user.roles, isAdmin: user.isAdmin });
+    res.json({ success: true, user: { _id: user._id, email: user.email, roles: user.roles, isAdmin: user.isAdmin } });
+  } catch (err) {
+    sendProblem(res, 500, 'Internal Server Error', err.message);
+  }
+});
+
+// Production Keyset / Cursor Paginated Audit Log Endpoint
+app.get('/api/admin/audit-logs', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const limit = Math.min(parseInt(req.query.limit, 10) || 25, 100);
+    const { cursor, action } = req.query;
+
+    const query = {};
+    if (action) {
+      query.action = action;
+    }
+    if (cursor) {
+      query.timestamp = { $lt: new Date(cursor) };
+    }
+
+    const logs = await AuditLog.find(query)
+      .sort({ timestamp: -1, _id: -1 })
+      .limit(limit + 1)
+      .populate('userId', 'displayName email')
+      .lean();
+
+    const hasMore = logs.length > limit;
+    const items = hasMore ? logs.slice(0, limit) : logs;
+    const nextCursor = hasMore && items.length > 0 ? items[items.length - 1].timestamp.toISOString() : null;
+
+    res.json({
+      items,
+      nextCursor,
+      hasMore
+    });
+  } catch (err) {
+    sendProblem(res, 500, 'Internal Server Error', err.message);
+  }
+});
+
+// ==========================================
+// Webhook & Integration Endpoints (Slack/Teams Parity)
+// ==========================================
+app.post('/api/channels/:id/webhooks', requireAuth, async (req, res) => {
+  try {
+    const { name } = req.body;
+    if (!name || typeof name !== 'string' || !name.trim()) {
+      return sendProblem(res, 400, 'Bad Request', 'Webhook name is required');
+    }
+    const group = await Group.findById(req.params.id);
+    if (!group) {
+      return sendProblem(res, 404, 'Not Found', 'Channel not found');
+    }
+    const userIdStr = req.user._id.toString();
+    const isMemberOrMod = group.createdBy?.toString() === userIdStr ||
+      (Array.isArray(group.members) && group.members.some(m => m.toString() === userIdStr)) ||
+      req.user.isAdmin;
+    if (!isMemberOrMod) {
+      return sendProblem(res, 403, 'Forbidden', 'Only channel members or admins can create webhooks');
+    }
+
+    const webhook = await Webhook.create({
+      channelId: group._id,
+      name: name.trim(),
+      createdBy: req.user._id
+    });
+
+    await recordAuditLog(req, 'WEBHOOK_CREATED', 'Webhook', webhook._id, { channelId: group._id, name: webhook.name });
+
+    res.status(201).json({
+      _id: webhook._id,
+      channelId: webhook.channelId,
+      name: webhook.name,
+      token: webhook.token,
+      webhookUrl: `/api/webhooks/${webhook.token}`,
+      createdAt: webhook.createdAt
+    });
+  } catch (err) {
+    sendProblem(res, 500, 'Internal Server Error', err.message);
+  }
+});
+
+app.get('/api/channels/:id/webhooks', requireAuth, async (req, res) => {
+  try {
+    const group = await Group.findById(req.params.id);
+    if (!group) {
+      return sendProblem(res, 404, 'Not Found', 'Channel not found');
+    }
+    const userIdStr = req.user._id.toString();
+    const isMember = group.createdBy?.toString() === userIdStr ||
+      (Array.isArray(group.members) && group.members.some(m => m.toString() === userIdStr)) ||
+      req.user.isAdmin;
+    if (!isMember) {
+      return sendProblem(res, 403, 'Forbidden', 'Access denied to channel webhooks');
+    }
+
+    const webhooks = await Webhook.find({ channelId: group._id, isActive: true })
+      .select('_id name token createdAt createdBy channelId')
+      .sort({ createdAt: -1 });
+
+    const formatted = webhooks.map(w => ({
+      _id: w._id,
+      channelId: w.channelId,
+      name: w.name,
+      token: w.token,
+      webhookUrl: `/api/webhooks/${w.token}`,
+      createdAt: w.createdAt,
+      createdBy: w.createdBy
+    }));
+    res.json(formatted);
+  } catch (err) {
+    sendProblem(res, 500, 'Internal Server Error', err.message);
+  }
+});
+
+app.delete('/api/webhooks/:id', requireAuth, async (req, res) => {
+  try {
+    const webhook = await Webhook.findById(req.params.id);
+    if (!webhook || !webhook.isActive) {
+      return sendProblem(res, 404, 'Not Found', 'Webhook not found');
+    }
+    const group = await Group.findById(webhook.channelId);
+    const userIdStr = req.user._id.toString();
+    const canDelete = webhook.createdBy?.toString() === userIdStr ||
+      group?.createdBy?.toString() === userIdStr ||
+      (group?.moderators && group.moderators.some(m => m.toString() === userIdStr)) ||
+      req.user.isAdmin;
+    if (!canDelete) {
+      return sendProblem(res, 403, 'Forbidden', 'Cannot delete this webhook');
+    }
+    webhook.isActive = false;
+    await webhook.save();
+
+    await recordAuditLog(req, 'WEBHOOK_DELETED', 'Webhook', webhook._id, { channelId: webhook.channelId });
+
+    res.json({ success: true, id: webhook._id });
+  } catch (err) {
+    sendProblem(res, 500, 'Internal Server Error', err.message);
+  }
+});
+
+// Public incoming webhook ingestion endpoint
+app.post('/api/webhooks/:token', async (req, res) => {
+  try {
+    const webhook = await Webhook.findOne({ token: req.params.token, isActive: true });
+    if (!webhook) {
+      return sendProblem(res, 404, 'Not Found', 'Webhook not found or disabled');
+    }
+
+    const { text, content, username } = req.body || {};
+    const messageContent = text || content;
+    if (!messageContent || typeof messageContent !== 'string' || !messageContent.trim()) {
+      return sendProblem(res, 400, 'Bad Request', 'Message text or content is required');
+    }
+
+    // Resolve or create Webhook bot user
+    let webhookUser = await User.findOne({ email: 'webhook@kuchoo.internal' });
+    if (!webhookUser) {
+      webhookUser = await User.create({
+        email: 'webhook@kuchoo.internal',
+        displayName: 'Webhook Bot',
+        roles: ['bot'],
+        online: true
+      });
+    }
+
+    const senderDisplayName = username?.trim() || webhook.name;
+    const finalContent = `🤖 **[${senderDisplayName}]**: ${messageContent.trim()}`;
+
+    const message = await Message.create({
+      from: webhookUser._id.toString(),
+      to: webhook.channelId.toString(),
+      content: finalContent
+    });
+
+    io.to(webhook.channelId.toString()).emit('receive_message', message);
+
+    res.status(201).json({ success: true, messageId: message._id, channelId: webhook.channelId });
+  } catch (err) {
+    sendProblem(res, 500, 'Internal Server Error', err.message);
   }
 });
 
@@ -1041,7 +1269,7 @@ io.on('connection', (socket) => {
   });
 
   socket.on('send_message', async (data) => {
-    const { from, to, content, fileUrl, voiceUrl, parentId } = data;
+    let { from, to, content, fileUrl, voiceUrl, parentId } = data;
 
     // Enforce private channel membership check if target is a channel
     const destinationId = parentId ? (await Message.findById(parentId).select('to'))?.to : to;
@@ -1053,6 +1281,124 @@ io.on('connection', (socket) => {
           (Array.isArray(destGroup.members) && destGroup.members.some(m => m.toString() === fromStr));
         if (!isMember) {
           socket.emit('error_message', { message: 'You are not a member of this private channel.' });
+          return;
+        }
+      }
+    }
+
+    // Slash command processing
+    if (content && typeof content === 'string' && content.startsWith('/')) {
+      const slashMatch = content.match(/^\/([a-zA-Z0-9_-]+)(?:\s+(.*))?$/s);
+      if (slashMatch) {
+        const cmd = slashMatch[1].toLowerCase();
+        const args = (slashMatch[2] || '').trim();
+
+        if (cmd === 'shrug') {
+          content = args ? `${args} ¯\\_(ツ)_/¯` : '¯\\_(ツ)_/¯';
+        } else if (cmd === 'topic') {
+          const targetChannelId = parentId ? (await Message.findById(parentId).select('to'))?.to : to;
+          if (targetChannelId) {
+            const group = await Group.findById(targetChannelId);
+            if (group) {
+              const senderUser = await User.findById(from).select('displayName email');
+              group.topic = args;
+              await group.save();
+              const senderName = senderUser?.displayName || senderUser?.email || 'A member';
+              const sysMsg = await Message.create({
+                from: from || 'system',
+                to: targetChannelId,
+                content: `📢 **${senderName}** set the channel topic: *${args || 'None'}*`
+              });
+              io.to(targetChannelId).to(from).emit('receive_message', sysMsg);
+              io.to(targetChannelId).to(from).emit('channel_updated', group);
+              return;
+            }
+          }
+        } else if (cmd === 'poll') {
+          const targetRoom = parentId ? (await Message.findById(parentId).select('to'))?.to : to;
+          const parts = args.split('|').map(s => s.trim()).filter(Boolean);
+          const question = parts[0] || 'Poll';
+          const options = parts.slice(1).length > 0 ? parts.slice(1) : ['Yes', 'No'];
+          const numberEmojis = ['1️⃣', '2️⃣', '3️⃣', '4️⃣', '5️⃣', '6️⃣', '7️⃣', '8️⃣', '9️⃣', '🔟'];
+
+          let pollContent = `📊 **POLL: ${question}**\n\n`;
+          options.forEach((opt, idx) => {
+            const emoji = numberEmojis[idx] || `${idx + 1}.`;
+            pollContent += `${emoji} ${opt}\n`;
+          });
+          pollContent += `\n*React below to cast your vote!*`;
+
+          const initialReactions = options.slice(0, 10).map((_, idx) => ({
+            emoji: numberEmojis[idx],
+            users: []
+          }));
+
+          if (parentId) {
+            const parent = await Message.findById(parentId);
+            if (parent) {
+              const reply = await Message.create({
+                from,
+                to: targetRoom,
+                content: pollContent,
+                reactions: initialReactions,
+                parentId: parent._id,
+                group: parent.group
+              });
+              parent.replyCount = (parent.replyCount || 0) + 1;
+              parent.lastReplyAt = new Date();
+              await parent.save();
+              io.to(targetRoom).to(from).emit('thread_reply', { parentId: parent._id, reply });
+              io.to(targetRoom).to(from).emit('message_updated', parent);
+            }
+          } else {
+            const pollMessage = await Message.create({
+              from,
+              to: targetRoom,
+              content: pollContent,
+              reactions: initialReactions
+            });
+            io.to(targetRoom).to(from).emit('receive_message', pollMessage);
+          }
+          return;
+        } else if (cmd === 'dnd') {
+          const user = await User.findById(from);
+          if (user) {
+            user.dnd = !user.dnd;
+            await user.save();
+            io.emit('user_status_updated', {
+              userId: user._id,
+              customStatus: user.customStatus,
+              dnd: user.dnd
+            });
+            socket.emit('receive_message', {
+              _id: 'sys_' + Date.now(),
+              from: 'system',
+              to: from,
+              content: `🔕 Do Not Disturb mode is now **${user.dnd ? 'ENABLED' : 'DISABLED'}**.`
+            });
+            return;
+          }
+        } else if (cmd === 'aladin') {
+          const targetRoom = parentId ? (await Message.findById(parentId).select('to'))?.to : to;
+          const userMsg = await Message.create({
+            from,
+            to: targetRoom,
+            content: args || 'Hello Aladin',
+            parentId: parentId || null
+          });
+          if (parentId) {
+            const parent = await Message.findById(parentId);
+            if (parent) {
+              parent.replyCount = (parent.replyCount || 0) + 1;
+              parent.lastReplyAt = new Date();
+              await parent.save();
+              io.to(targetRoom).to(from).emit('thread_reply', { parentId: parent._id, reply: userMsg });
+              io.to(targetRoom).to(from).emit('message_updated', parent);
+            }
+          } else {
+            io.to(targetRoom).to(from).emit('receive_message', userMsg);
+          }
+          handleAladinBotReply(targetRoom, args || 'Hello', from, parentId);
           return;
         }
       }

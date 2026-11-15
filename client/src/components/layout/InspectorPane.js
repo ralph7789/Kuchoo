@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { X, Phone, Video, Shield, FileText, Pin, AtSign, Bell, MessageSquare, Hash, Lock } from '../common/Icons';
+import { X, Phone, Video, Shield, FileText, Pin, AtSign, Bell, MessageSquare, Hash, Lock, Zap, Trash2, Copy, Check, Plus } from '../common/Icons';
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL || '';
 
@@ -15,9 +15,13 @@ export default function InspectorPane({
   onUnpinMessage,
   onSelectTarget
 }) {
-  const [activeTab, setActiveTab] = useState('overview'); // 'overview' | 'activity'
+  const [activeTab, setActiveTab] = useState('overview'); // 'overview' | 'activity' | 'integrations'
   const [mentions, setMentions] = useState([]);
   const [loadingMentions, setLoadingMentions] = useState(false);
+  const [webhooks, setWebhooks] = useState([]);
+  const [newWebhookName, setNewWebhookName] = useState('');
+  const [loadingWebhooks, setLoadingWebhooks] = useState(false);
+  const [copiedToken, setCopiedToken] = useState(null);
 
   useEffect(() => {
     if (activeTab === 'activity') {
@@ -31,6 +35,65 @@ export default function InspectorPane({
         .finally(() => setLoadingMentions(false));
     }
   }, [activeTab]);
+
+  const isUser = activeTarget?.type === 'user';
+  const isGroup = activeTarget?.type === 'group';
+  const isAladin = activeTarget?.type === 'aladin';
+  const targetGroup = isGroup ? activeTarget.group : null;
+
+  useEffect(() => {
+    if (activeTab === 'integrations' && targetGroup?._id) {
+      setLoadingWebhooks(true);
+      fetch(`${BACKEND_URL}/api/channels/${targetGroup._id}/webhooks`, { credentials: 'include' })
+        .then(res => res.json())
+        .then(data => {
+          if (Array.isArray(data)) setWebhooks(data);
+        })
+        .catch(err => console.error('Failed to load webhooks:', err))
+        .finally(() => setLoadingWebhooks(false));
+    }
+  }, [activeTab, targetGroup?._id]);
+
+  const handleCreateWebhook = async (e) => {
+    e.preventDefault();
+    if (!newWebhookName.trim() || !targetGroup?._id) return;
+    try {
+      const res = await fetch(`${BACKEND_URL}/api/channels/${targetGroup._id}/webhooks`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ name: newWebhookName.trim() })
+      });
+      if (res.ok) {
+        const created = await res.json();
+        setWebhooks(prev => [created, ...prev]);
+        setNewWebhookName('');
+      }
+    } catch (err) {
+      console.error('Failed to create webhook:', err);
+    }
+  };
+
+  const handleDeleteWebhook = async (webhookId) => {
+    try {
+      const res = await fetch(`${BACKEND_URL}/api/webhooks/${webhookId}`, {
+        method: 'DELETE',
+        credentials: 'include'
+      });
+      if (res.ok) {
+        setWebhooks(prev => prev.filter(w => w._id !== webhookId));
+      }
+    } catch (err) {
+      console.error('Failed to delete webhook:', err);
+    }
+  };
+
+  const handleCopyUrl = (token) => {
+    const fullUrl = `${window.location.origin}/api/webhooks/${token}`;
+    navigator.clipboard.writeText(fullUrl);
+    setCopiedToken(token);
+    setTimeout(() => setCopiedToken(null), 2500);
+  };
 
   if (!activeTarget) return null;
 
@@ -87,6 +150,28 @@ export default function InspectorPane({
             <Bell size={13} />
             <span>Activity</span>
           </button>
+          {isGroup && (
+            <button
+              type="button"
+              onClick={() => setActiveTab('integrations')}
+              style={{
+                background: 'none',
+                border: 'none',
+                borderBottom: activeTab === 'integrations' ? '2px solid #00F0FF' : '2px solid transparent',
+                color: activeTab === 'integrations' ? '#00F0FF' : '#94A3B8',
+                fontSize: 13,
+                fontWeight: 700,
+                padding: '12px 6px',
+                cursor: 'pointer',
+                display: 'flex',
+                alignItems: 'center',
+                gap: 4
+              }}
+            >
+              <Zap size={13} />
+              <span>Webhooks</span>
+            </button>
+          )}
         </div>
 
         <button
@@ -100,7 +185,132 @@ export default function InspectorPane({
       </div>
 
       <div className="sidebar-content-scroll" style={{ padding: '16px' }}>
-        {activeTab === 'activity' ? (
+        {activeTab === 'integrations' ? (
+          <div>
+            <div style={{ fontSize: 12, fontWeight: 700, textTransform: 'uppercase', color: '#64748B', letterSpacing: '0.06em', marginBottom: 12, display: 'flex', alignItems: 'center', gap: 6 }}>
+              <Zap size={13} color="#00F0FF" />
+              <span>Channel Webhooks ({webhooks.length})</span>
+            </div>
+
+            {/* Create Webhook Form */}
+            <form onSubmit={handleCreateWebhook} style={{ marginBottom: 16, display: 'flex', gap: 8 }}>
+              <input
+                type="text"
+                placeholder="Webhook name (e.g. GitHub)"
+                value={newWebhookName}
+                onChange={e => setNewWebhookName(e.target.value)}
+                style={{
+                  flex: 1,
+                  background: '#0B1120',
+                  border: '1px solid rgba(255, 255, 255, 0.12)',
+                  borderRadius: 6,
+                  padding: '7px 10px',
+                  color: '#F8FAFC',
+                  fontSize: 12,
+                  outline: 'none'
+                }}
+              />
+              <button
+                type="submit"
+                disabled={!newWebhookName.trim()}
+                style={{
+                  background: '#00F0FF',
+                  color: '#000',
+                  border: 'none',
+                  borderRadius: 6,
+                  padding: '7px 12px',
+                  fontWeight: 600,
+                  fontSize: 12,
+                  cursor: newWebhookName.trim() ? 'pointer' : 'not-allowed',
+                  opacity: newWebhookName.trim() ? 1 : 0.5,
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 4
+                }}
+              >
+                <Plus size={14} />
+                <span>Add</span>
+              </button>
+            </form>
+
+            {loadingWebhooks ? (
+              <div style={{ fontSize: 12, color: '#94A3B8', textAlign: 'center', padding: 20 }}>Loading webhooks...</div>
+            ) : webhooks.length === 0 ? (
+              <div style={{ fontSize: 12, color: '#64748B', textAlign: 'center', padding: 24 }}>
+                No active webhooks. Create one to receive automated messages from CI/CD, GitHub, or bots.
+              </div>
+            ) : (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                {webhooks.map(wh => {
+                  const isCopied = copiedToken === wh.token;
+                  return (
+                    <div
+                      key={wh._id}
+                      style={{
+                        background: 'rgba(255, 255, 255, 0.03)',
+                        border: '1px solid rgba(255, 255, 255, 0.08)',
+                        borderRadius: 8,
+                        padding: 10
+                      }}
+                    >
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+                        <span style={{ fontSize: 13, fontWeight: 600, color: '#F8FAFC' }}>{wh.name}</span>
+                        <button
+                          type="button"
+                          onClick={() => handleDeleteWebhook(wh._id)}
+                          style={{
+                            background: 'none',
+                            border: 'none',
+                            color: '#EF4444',
+                            cursor: 'pointer',
+                            padding: 2
+                          }}
+                          title="Revoke webhook"
+                        >
+                          <Trash2 size={13} />
+                        </button>
+                      </div>
+
+                      <div style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'space-between',
+                        background: '#0B1120',
+                        padding: '5px 8px',
+                        borderRadius: 6,
+                        border: '1px solid rgba(255, 255, 255, 0.06)'
+                      }}>
+                        <code style={{ fontSize: 10, color: '#94A3B8', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 180 }}>
+                          /api/webhooks/{wh.token}
+                        </code>
+                        <button
+                          type="button"
+                          onClick={() => handleCopyUrl(wh.token)}
+                          style={{
+                            background: isCopied ? '#10B981' : 'rgba(0, 240, 255, 0.1)',
+                            border: 'none',
+                            borderRadius: 4,
+                            padding: '3px 8px',
+                            color: isCopied ? '#fff' : '#00F0FF',
+                            fontSize: 11,
+                            fontWeight: 600,
+                            cursor: 'pointer',
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: 4
+                          }}
+                        >
+                          {isCopied ? <Check size={12} /> : <Copy size={12} />}
+                          <span>{isCopied ? 'Copied' : 'Copy'}</span>
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        ) : activeTab === 'activity' ? (
           /* Mentions & Alerts Tray (Slack Activity Parity) */
           <div>
             <div style={{ fontSize: 12, fontWeight: 700, textTransform: 'uppercase', color: '#64748B', letterSpacing: '0.06em', marginBottom: 12, display: 'flex', alignItems: 'center', gap: 6 }}>

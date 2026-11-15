@@ -1,5 +1,5 @@
 import React, { useRef, useState, useEffect } from 'react';
-import { Paperclip, Mic, MicOff, Send, Sparkles, AtSign, Users } from '../common/Icons';
+import { Paperclip, Mic, MicOff, Send, Sparkles, AtSign, Users, Terminal, Zap, BarChart2, Bell } from '../common/Icons';
 
 export default function RichInputDock({
   content,
@@ -19,6 +19,23 @@ export default function RichInputDock({
   const [mentionQuery, setMentionQuery] = useState(null); // string query or null
   const [mentionStartIndex, setMentionStartIndex] = useState(-1);
   const [selectedIndex, setSelectedIndex] = useState(0);
+
+  // Slash command autocomplete state
+  const [slashQuery, setSlashQuery] = useState(null);
+  const [selectedSlashIndex, setSelectedSlashIndex] = useState(0);
+
+  // Slash commands registry
+  const slashCommands = [
+    { id: 'aladin', command: '/aladin ', title: '/aladin <prompt>', desc: 'Ask Aladin AI Copilot directly', type: 'bot' },
+    { id: 'poll', command: '/poll ', title: '/poll <question> | <opt1> | <opt2>', desc: 'Create an interactive reaction poll', type: 'poll' },
+    { id: 'topic', command: '/topic ', title: '/topic <new_topic>', desc: 'Set or update the channel topic', type: 'command' },
+    { id: 'shrug', command: '/shrug ', title: '/shrug <text>', desc: 'Append ¯\\_(ツ)_/¯ to message', type: 'command' },
+    { id: 'dnd', command: '/dnd', title: '/dnd', desc: 'Toggle Do Not Disturb mode on/off', type: 'status' }
+  ];
+
+  const filteredSlashCommands = slashQuery !== null
+    ? slashCommands.filter(c => c.id.toLowerCase().includes(slashQuery.toLowerCase()) || c.title.toLowerCase().includes(slashQuery.toLowerCase()))
+    : [];
 
   // Mention options
   const defaultOptions = [
@@ -47,6 +64,33 @@ export default function RichInputDock({
   useEffect(() => {
     setSelectedIndex(0);
   }, [mentionQuery]);
+
+  useEffect(() => {
+    setSelectedSlashIndex(0);
+  }, [slashQuery]);
+
+  const detectSlash = (text, cursorPos) => {
+    if (text.startsWith('/')) {
+      const firstSpace = text.indexOf(' ');
+      if (firstSpace === -1 || cursorPos <= firstSpace) {
+        const query = text.slice(1, cursorPos);
+        setSlashQuery(query);
+        return;
+      }
+    }
+    setSlashQuery(null);
+  };
+
+  const handleSelectSlash = (item) => {
+    setContent(item.command);
+    setSlashQuery(null);
+    setTimeout(() => {
+      if (textareaRef.current) {
+        textareaRef.current.focus();
+        textareaRef.current.setSelectionRange(item.command.length, item.command.length);
+      }
+    }, 0);
+  };
 
   const detectMention = (text, cursorPos) => {
     const textBefore = text.slice(0, cursorPos);
@@ -85,6 +129,29 @@ export default function RichInputDock({
   };
 
   const handleKeyDown = (e) => {
+    if (slashQuery !== null && filteredSlashCommands.length > 0) {
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        setSelectedSlashIndex(prev => (prev + 1) % filteredSlashCommands.length);
+        return;
+      }
+      if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        setSelectedSlashIndex(prev => (prev - 1 + filteredSlashCommands.length) % filteredSlashCommands.length);
+        return;
+      }
+      if (e.key === 'Enter' || e.key === 'Tab') {
+        e.preventDefault();
+        handleSelectSlash(filteredSlashCommands[selectedSlashIndex]);
+        return;
+      }
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        setSlashQuery(null);
+        return;
+      }
+    }
+
     if (mentionQuery !== null && filteredSuggestions.length > 0) {
       if (e.key === 'ArrowDown') {
         e.preventDefault();
@@ -118,6 +185,7 @@ export default function RichInputDock({
     const val = e.target.value;
     setContent(val);
     detectMention(val, e.target.selectionStart);
+    detectSlash(val, e.target.selectionStart);
 
     // Auto-expand textarea up to max-height
     if (textareaRef.current) {
@@ -209,11 +277,84 @@ export default function RichInputDock({
         </div>
       )}
 
+      {/* Slash Commands Autocomplete Popover */}
+      {slashQuery !== null && filteredSlashCommands.length > 0 && (
+        <div style={{
+          position: 'absolute',
+          bottom: 'calc(100% + 8px)',
+          left: 16,
+          width: 340,
+          background: '#0F172A',
+          border: '1px solid rgba(139, 92, 246, 0.35)',
+          borderRadius: 10,
+          boxShadow: '0 12px 30px rgba(0, 0, 0, 0.6), 0 0 15px rgba(139, 92, 246, 0.15)',
+          overflow: 'hidden',
+          zIndex: 100
+        }}>
+          <div style={{
+            padding: '6px 12px',
+            fontSize: 11,
+            fontWeight: 700,
+            textTransform: 'uppercase',
+            letterSpacing: '0.05em',
+            color: '#A78BFA',
+            background: 'rgba(255, 255, 255, 0.02)',
+            borderBottom: '1px solid rgba(255, 255, 255, 0.06)'
+          }}>
+            Slash Commands matching "/{slashQuery}"
+          </div>
+
+          <div style={{ maxHeight: 220, overflowY: 'auto', display: 'flex', flexDirection: 'column' }}>
+            {filteredSlashCommands.map((item, idx) => {
+              const isSelected = idx === selectedSlashIndex;
+              return (
+                <div
+                  key={item.id}
+                  onClick={() => handleSelectSlash(item)}
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 10,
+                    padding: '8px 12px',
+                    cursor: 'pointer',
+                    background: isSelected ? 'rgba(139, 92, 246, 0.15)' : 'transparent',
+                    borderLeft: isSelected ? '3px solid #8B5CF6' : '3px solid transparent',
+                    transition: 'background 0.15s ease'
+                  }}
+                >
+                  <div style={{
+                    width: 28,
+                    height: 28,
+                    borderRadius: 6,
+                    background: item.type === 'bot' ? 'linear-gradient(135deg, #8B5CF6, #06B6D4)' : (item.type === 'poll' ? '#3B82F6' : '#1E293B'),
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    color: '#fff',
+                    flexShrink: 0
+                  }}>
+                    {item.type === 'bot' ? <Sparkles size={14} /> : (item.type === 'poll' ? <BarChart2 size={14} /> : (item.type === 'status' ? <Bell size={14} /> : <Terminal size={14} />))}
+                  </div>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: 13, fontWeight: 600, color: '#F8FAFC', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                      {item.title}
+                    </div>
+                    <div style={{ fontSize: 11, color: '#94A3B8', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                      {item.desc}
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
       <div className="rich-input-wrapper">
         <textarea
           ref={textareaRef}
           className="rich-textarea"
-          placeholder="Message or type @aladin for AI copilot... (Enter to send, Shift+Enter for newline)"
+          placeholder="Message, /slash command, or @aladin... (Enter to send, Shift+Enter for newline)"
           value={content}
           onChange={handleTextareaChange}
           onKeyDown={handleKeyDown}
