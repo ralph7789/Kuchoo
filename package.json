@@ -4,7 +4,7 @@
   "main": "index.js",
   "scripts": {
     "start": "node server.js",
-    "test": "node test_milestone1_parity.js && node test_milestone2_parity.js && node test_milestone3_parity.js && node test_milestone4_parity.js && node test_milestone5_parity.js && node test_milestone6_parity.js"
+    "test": "node test_milestone1_parity.js && node test_milestone2_parity.js && node test_milestone3_parity.js && node test_milestone4_parity.js && node test_milestone5_parity.js && node test_milestone6_parity.js && node test_xid_auth_parity.js"
   },
   "keywords": [],
   "author": "",

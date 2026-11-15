@@ -16,6 +16,7 @@ const path = require('path');
 const fs = require('fs');
 const MongoStore = require('connect-mongo');
 const jwt = require('jsonwebtoken');
+const crypto = require('crypto');
 
 // Load Mongoose models
 const User = require('./models/User');
@@ -26,6 +27,7 @@ const AuditLog = require('./models/AuditLog');
 
 
 const app = express();
+app.set('trust proxy', 1);
 const server = http.createServer(app);
 
 // Configuration & Secrets
@@ -277,77 +279,262 @@ app.get('/api/webrtc/config', (req, res) => {
 });
 
 // ==========================================
-// XID SSO OAuth2 & OpenID Connect Endpoints
+// XID SSO OAuth2 & OpenID Connect Endpoints (PKCE S256 & Dual Ingestion)
 // ==========================================
+// Bounded in-memory PKCE state cache for cross-origin SSO resilience (10-minute TTL)
+const pkceStateCache = new Map();
+const PKCE_STATE_TTL_MS = 10 * 60 * 1000;
+
+function cleanPkceStateCache() {
+  const now = Date.now();
+  for (const [key, val] of pkceStateCache.entries()) {
+    if (now - val.createdAt > PKCE_STATE_TTL_MS) {
+      pkceStateCache.delete(key);
+    }
+  }
+}
+
 app.get('/api/auth/xid/login', (req, res) => {
+  cleanPkceStateCache();
   const host = req.get('host') || 'chat.xcorp.mywire.org';
-  const proto = req.get('x-forwarded-proto') || 'https';
+  const proto = req.get('x-forwarded-proto') || (req.secure ? 'https' : 'http');
   const redirectUri = `${proto}://${host}/api/auth/xid/callback`;
-  const authUrl = `${XID_ISSUER}/oauth/authorize?client_id=${encodeURIComponent(XID_CLIENT_ID)}&redirect_uri=${encodeURIComponent(redirectUri)}&response_type=code&scope=openid%20profile%20email`;
-  res.redirect(authUrl);
+
+  // Generate cryptographically secure state, nonce, and PKCE S256 parameters
+  const state = crypto.randomBytes(16).toString('hex');
+  const nonce = crypto.randomBytes(16).toString('hex');
+  const codeVerifier = crypto.randomBytes(32).toString('base64url');
+  const codeChallenge = crypto.createHash('sha256').update(codeVerifier).digest('base64url');
+
+  // Store in session and fallback cache
+  if (req.session) {
+    req.session.xidState = state;
+    req.session.xidNonce = nonce;
+    req.session.xidVerifier = codeVerifier;
+  }
+  pkceStateCache.set(state, { verifier: codeVerifier, nonce, createdAt: Date.now() });
+
+  const params = new URLSearchParams({
+    client_id: XID_CLIENT_ID,
+    redirect_uri: redirectUri,
+    response_type: 'code',
+    scope: 'openid profile email',
+    state,
+    nonce,
+    code_challenge: codeChallenge,
+    code_challenge_method: 'S256'
+  });
+
+  const authUrl = `${XID_ISSUER}/oauth/authorize?${params.toString()}`;
+
+  if (req.session) {
+    req.session.save((err) => {
+      if (err) console.error('[XID SSO] Error saving session before redirect:', err);
+      res.redirect(authUrl);
+    });
+  } else {
+    res.redirect(authUrl);
+  }
 });
 
 app.get('/api/auth/xid/callback', async (req, res) => {
-  const { code } = req.query;
+  cleanPkceStateCache();
+  const { code, token, auth_token, access_token, state, error, error_description } = req.query;
   const host = req.get('host') || 'chat.xcorp.mywire.org';
-  const proto = req.get('x-forwarded-proto') || 'https';
+  const proto = req.get('x-forwarded-proto') || (req.secure ? 'https' : 'http');
   const redirectUri = `${proto}://${host}/api/auth/xid/callback`;
 
-  if (!code) {
+  if (error) {
+    console.error(`[XID SSO] Provider error: ${error} - ${error_description || ''}`);
+    return res.redirect(`/?error=${encodeURIComponent(error)}&detail=${encodeURIComponent(error_description || '')}`);
+  }
+
+  if (!code && !token && !auth_token && !access_token) {
+    console.warn('[XID SSO] Callback received with neither code nor token. Query:', req.query);
     return res.redirect('/?error=missing_auth_code');
   }
 
   try {
-    const tokenRes = await fetch(`${XID_INTERNAL_URL}/oauth/token`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({
+    // Helper to provision user and commit session
+    const completeAuthentication = async (profile) => {
+      const user = await findOrCreateXIDUser({
+        xidId: profile.sub || profile.id,
+        email: profile.email,
+        displayName: profile.name || profile.displayName || profile.preferred_username || (profile.email ? profile.email.split('@')[0] : 'XCorp User'),
+        avatarUrl: profile.avatarUrl || profile.picture || profile.avatar || '',
+        roles: profile.roles || ['user'],
+        isAdmin: (profile.roles && (profile.roles.includes('admin') || profile.roles.includes('xadmin'))) || profile.isAdmin === true
+      });
+      req.session.userId = user._id;
+      return new Promise((resolve, reject) => {
+        req.session.save((err) => {
+          if (err) {
+            console.error('[XID SSO] Failed to save session:', err);
+            return reject(err);
+          }
+          resolve(user);
+        });
+      });
+    };
+
+    // Branch 1: Direct Token Ingestion (Fallback / Pre-authenticated SSO from XID)
+    const directToken = token || auth_token || access_token;
+    if (directToken && !code) {
+      console.log('[XID SSO] Resolving user via direct token parameter');
+      const userinfoEndpoints = [
+        `${XID_INTERNAL_URL}/oauth2/userinfo`,
+        `${XID_ISSUER}/oauth2/userinfo`,
+        `${XID_INTERNAL_URL}/oauth/userinfo`,
+        `${XID_ISSUER}/oauth/userinfo`,
+        `${XID_INTERNAL_URL}/api/identity/me`
+      ];
+
+      let profile = null;
+      for (const endpoint of userinfoEndpoints) {
+        try {
+          const userRes = await fetch(endpoint, {
+            headers: { Authorization: `Bearer ${directToken}` },
+            signal: AbortSignal.timeout(4000)
+          });
+          if (userRes.ok) {
+            profile = await userRes.json();
+            break;
+          }
+        } catch (_) {}
+      }
+
+      if (!profile) {
+        const decoded = jwt.decode(directToken);
+        if (decoded && (decoded.email || decoded.sub)) {
+          profile = {
+            sub: decoded.sub || decoded.id,
+            email: decoded.email,
+            name: decoded.name || decoded.displayName,
+            roles: decoded.roles,
+            isAdmin: decoded.isAdmin
+          };
+        }
+      }
+
+      if (profile && (profile.sub || profile.id || profile.email)) {
+        if (state) pkceStateCache.delete(state);
+        await completeAuthentication(profile);
+        return res.redirect('/');
+      }
+    }
+
+    // Branch 2: Standard OAuth2/OIDC Authorization Code Exchange with PKCE S256
+    if (code) {
+      let codeVerifier = req.session ? req.session.xidVerifier : null;
+      if (!codeVerifier && state && pkceStateCache.has(state)) {
+        codeVerifier = pkceStateCache.get(state).verifier;
+      }
+
+      const tokenEndpoints = [
+        `${XID_INTERNAL_URL}/oauth2/token`,
+        `${XID_ISSUER}/oauth2/token`,
+        `${XID_INTERNAL_URL}/oauth/token`,
+        `${XID_ISSUER}/oauth/token`
+      ];
+
+      let tokenData = null;
+      const bodyParams = {
         grant_type: 'authorization_code',
         code,
         client_id: XID_CLIENT_ID,
         client_secret: XID_CLIENT_SECRET,
         redirect_uri: redirectUri
-      })
-    });
+      };
+      if (codeVerifier) {
+        bodyParams.code_verifier = codeVerifier;
+      }
 
-    if (tokenRes.ok) {
-      const tokenData = await tokenRes.json();
-      const userRes = await fetch(`${XID_INTERNAL_URL}/oauth/userinfo`, {
-        headers: { Authorization: `Bearer ${tokenData.access_token}` }
-      });
-      if (userRes.ok) {
-        const profile = await userRes.json();
-        const user = await findOrCreateXIDUser({
-          xidId: profile.sub || profile.id,
-          email: profile.email,
-          displayName: profile.name || profile.displayName || profile.preferred_username,
-          avatarUrl: profile.avatarUrl || profile.picture,
-          roles: profile.roles || ['user'],
-          isAdmin: profile.roles && (profile.roles.includes('admin') || profile.roles.includes('xadmin'))
+      for (const endpoint of tokenEndpoints) {
+        try {
+          const tokenRes = await fetch(endpoint, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body: new URLSearchParams(bodyParams),
+            signal: AbortSignal.timeout(5000)
+          });
+
+          if (tokenRes.ok) {
+            tokenData = await tokenRes.json();
+            break;
+          } else {
+            const errText = await tokenRes.text().catch(() => '');
+            console.warn(`[XID SSO] Token exchange at ${endpoint} returned status ${tokenRes.status}: ${errText}`);
+          }
+        } catch (fetchErr) {
+          console.warn(`[XID SSO] Failed token exchange at ${endpoint}: ${fetchErr.message}`);
+        }
+      }
+
+      if (tokenData && (tokenData.access_token || tokenData.id_token)) {
+        let profile = null;
+        if (tokenData.access_token) {
+          const userinfoEndpoints = [
+            `${XID_INTERNAL_URL}/oauth2/userinfo`,
+            `${XID_ISSUER}/oauth2/userinfo`,
+            `${XID_INTERNAL_URL}/oauth/userinfo`,
+            `${XID_ISSUER}/oauth/userinfo`,
+            `${XID_INTERNAL_URL}/api/identity/me`
+          ];
+          for (const uEndpoint of userinfoEndpoints) {
+            try {
+              const userRes = await fetch(uEndpoint, {
+                headers: { Authorization: `Bearer ${tokenData.access_token}` },
+                signal: AbortSignal.timeout(4000)
+              });
+              if (userRes.ok) {
+                profile = await userRes.json();
+                break;
+              }
+            } catch (_) {}
+          }
+        }
+
+        if (!profile && tokenData.id_token) {
+          const idClaims = jwt.decode(tokenData.id_token);
+          if (idClaims && (idClaims.email || idClaims.sub)) {
+            profile = {
+              sub: idClaims.sub || idClaims.id,
+              email: idClaims.email,
+              name: idClaims.name || idClaims.displayName,
+              roles: idClaims.roles,
+              isAdmin: idClaims.isAdmin
+            };
+          }
+        }
+
+        if (profile && (profile.sub || profile.id || profile.email)) {
+          if (state) pkceStateCache.delete(state);
+          await completeAuthentication(profile);
+          return res.redirect('/');
+        }
+      }
+
+      // Fallback: decode code directly if Sentinel/XID passes signed claims in code
+      const decoded = jwt.decode(code);
+      if (decoded && (decoded.email || decoded.sub)) {
+        if (state) pkceStateCache.delete(state);
+        await completeAuthentication({
+          sub: decoded.sub || decoded.id,
+          email: decoded.email,
+          name: decoded.name || decoded.displayName,
+          roles: decoded.roles,
+          isAdmin: decoded.isAdmin
         });
-        req.session.userId = user._id;
         return res.redirect('/');
       }
     }
 
-    // Fallback: decode code directly if Sentinel/XID code contains claims
-    const decoded = jwt.decode(code);
-    if (decoded && (decoded.email || decoded.sub)) {
-      const user = await findOrCreateXIDUser({
-        xidId: decoded.sub,
-        email: decoded.email,
-        displayName: decoded.name || decoded.displayName || (decoded.email ? decoded.email.split('@')[0] : 'XCorp User'),
-        roles: decoded.roles || ['user'],
-        isAdmin: decoded.roles && (decoded.roles.includes('admin') || decoded.roles.includes('xadmin'))
-      });
-      req.session.userId = user._id;
-      return res.redirect('/');
-    }
-
-    res.redirect('/?error=auth_exchange_failed');
+    if (state) pkceStateCache.delete(state);
+    return res.redirect('/?error=auth_exchange_failed');
   } catch (err) {
-    console.error('XID callback error:', err);
-    res.redirect('/?error=auth_internal_error');
+    console.error('[XID SSO] Fatal callback error:', err);
+    if (state) pkceStateCache.delete(state);
+    return res.redirect('/?error=auth_internal_error');
   }
 });
 

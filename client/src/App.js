@@ -489,6 +489,27 @@ function App() {
       .catch(() => {});
   }, []);
 
+  // Parse SSO URL Parameters & Errors on Mount
+  useEffect(() => {
+    try {
+      const params = new URLSearchParams(window.location.search);
+      const errCode = params.get('error');
+      const errDetail = params.get('detail') || params.get('error_description');
+      if (errCode) {
+        const errorMap = {
+          missing_auth_code: 'SSO Error: Missing authorization code from XID provider.',
+          auth_exchange_failed: 'SSO Error: Token exchange with XID provider failed.',
+          auth_internal_error: 'SSO Error: Internal authentication server error during XID SSO.',
+          access_denied: 'SSO Access Denied: Authentication request was denied by XID.',
+          invalid_state: 'SSO Security Warning: Invalid or expired authentication state parameter.'
+        };
+        const displayMessage = errorMap[errCode] || `SSO Error: ${errCode}${errDetail ? ` (${errDetail})` : ''}`;
+        setError(displayMessage);
+        window.history.replaceState({}, document.title, window.location.pathname);
+      }
+    } catch (_) {}
+  }, []);
+
   // Fetch Current User on Mount
   useEffect(() => {
     fetch(`${BACKEND_URL}/api/user`, { credentials: 'include' })
