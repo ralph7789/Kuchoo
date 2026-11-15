@@ -97,12 +97,7 @@ export default function InspectorPane({
 
   if (!activeTarget) return null;
 
-  const isUser = activeTarget.type === 'user';
-  const isGroup = activeTarget.type === 'group';
-  const isAladin = activeTarget.type === 'aladin';
-
   const targetUser = isUser ? activeTarget.user : null;
-  const targetGroup = isGroup ? activeTarget.group : null;
   const isOnline = isUser ? Boolean(userStatus[targetUser?._id]) : true;
 
   const initials = isUser && targetUser?.displayName

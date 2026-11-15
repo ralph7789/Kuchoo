@@ -6,3 +6,4 @@ uploads/*
 .git
 .env
 Screenshots
+test_milestone*.js

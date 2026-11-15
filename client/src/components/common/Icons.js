@@ -331,12 +331,6 @@ export const Terminal = ({ size = 16, color = 'currentColor', className = '' }) 
   </svg>
 );
 
-export const Zap = ({ size = 16, color = 'currentColor', className = '' }) => (
-  <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}>
-    <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon>
-  </svg>
-);
-
 export const BarChart2 = ({ size = 16, color = 'currentColor', className = '' }) => (
   <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}>
     <line x1="18" y1="20" x2="18" y2="10"></line>
