@@ -431,6 +431,21 @@ app.get('/api/messages/:user1/:user2', requireAuth, async (req, res) => {
   try {
     const { user1, user2 } = req.params;
     const isGroup = await Group.exists({ _id: user2 }).catch(() => false);
+
+    // Private channel access enforcement
+    if (isGroup) {
+      const groupDoc = await Group.findById(user2).select('isPrivate isPublic members createdBy allowedRoles');
+      if (groupDoc && (groupDoc.isPrivate || groupDoc.isPublic === false)) {
+        const userIdStr = req.user._id.toString();
+        const hasAccess = req.user.isAdmin ||
+          groupDoc.createdBy?.toString() === userIdStr ||
+          (Array.isArray(groupDoc.members) && groupDoc.members.some(m => m.toString() === userIdStr));
+        if (!hasAccess) {
+          return sendProblem(res, 403, 'Forbidden', 'Access denied to private channel.', 'PRIVATE_CHANNEL_RESTRICTED');
+        }
+      }
+    }
+
     const rootCondition = {
       $or: [{ parentId: null }, { parentId: { $exists: false } }]
     };
@@ -683,30 +698,135 @@ app.post('/api/messages/:id/read', requireAuth, async (req, res) => {
 });
 
 // ==========================================
-// Group Chat APIs
+// Group & Channel APIs (Slack/Teams Parity)
 // ==========================================
 app.post('/api/groups', requireAuth, async (req, res) => {
-  const { name, members = [] } = req.body;
-  const memberSet = new Set(members.map(m => m.toString()));
-  memberSet.add(req.user._id.toString());
-  const group = await Group.create({
-    name,
-    members: Array.from(memberSet),
-    createdBy: req.user._id,
-    isPublic: true
-  });
-  res.json(group);
+  try {
+    const { name, topic = '', description = '', isPrivate = false, members = [] } = req.body;
+    if (!name || !name.trim()) {
+      return sendProblem(res, 400, 'Bad Request', 'Channel name is required', 'MISSING_CHANNEL_NAME');
+    }
+    const memberSet = new Set(members.map(m => m.toString()));
+    memberSet.add(req.user._id.toString());
+    const group = await Group.create({
+      name: name.trim().toLowerCase().replace(/\s+/g, '-'),
+      topic: topic.trim(),
+      description: description.trim(),
+      isPrivate: Boolean(isPrivate),
+      isPublic: !Boolean(isPrivate),
+      members: Array.from(memberSet),
+      moderators: [req.user._id],
+      createdBy: req.user._id
+    });
+    res.json(group);
+  } catch (err) {
+    sendProblem(res, 500, 'Internal Server Error', err.message);
+  }
 });
 
 app.get('/api/groups', requireAuth, async (req, res) => {
-  const groups = await Group.find({
-    $or: [
-      { isPublic: true },
-      { members: req.user._id },
-      { createdBy: req.user._id }
-    ]
-  }).sort('name');
-  res.json(groups);
+  try {
+    const query = req.user.isAdmin
+      ? {}
+      : {
+          $or: [
+            { isPrivate: false },
+            { isPublic: true },
+            { members: req.user._id },
+            { createdBy: req.user._id }
+          ]
+        };
+    const groups = await Group.find(query).populate('members', 'displayName email avatar').sort('name');
+    res.json(groups);
+  } catch (err) {
+    sendProblem(res, 500, 'Internal Server Error', err.message);
+  }
+});
+
+app.patch('/api/groups/:id', requireAuth, async (req, res) => {
+  try {
+    const group = await Group.findById(req.params.id);
+    if (!group) return sendProblem(res, 404, 'Not Found', 'Channel not found', 'CHANNEL_NOT_FOUND');
+
+    const userIdStr = req.user._id.toString();
+    const isMod = req.user.isAdmin ||
+      group.createdBy?.toString() === userIdStr ||
+      (Array.isArray(group.moderators) && group.moderators.some(m => m.toString() === userIdStr));
+
+    if (!isMod) {
+      return sendProblem(res, 403, 'Forbidden', 'Only moderators or channel creator can modify channel settings', 'NOT_MODERATOR');
+    }
+
+    const { name, topic, description, isPrivate } = req.body;
+    if (name !== undefined) group.name = name.trim().toLowerCase().replace(/\s+/g, '-');
+    if (topic !== undefined) group.topic = topic.trim();
+    if (description !== undefined) group.description = description.trim();
+    if (isPrivate !== undefined) {
+      group.isPrivate = Boolean(isPrivate);
+      group.isPublic = !Boolean(isPrivate);
+    }
+
+    await group.save();
+    res.json(group);
+  } catch (err) {
+    sendProblem(res, 500, 'Internal Server Error', err.message);
+  }
+});
+
+app.post('/api/groups/:id/members', requireAuth, async (req, res) => {
+  try {
+    const group = await Group.findById(req.params.id);
+    if (!group) return sendProblem(res, 404, 'Not Found', 'Channel not found', 'CHANNEL_NOT_FOUND');
+
+    const userIdStr = req.user._id.toString();
+    const isPrivateChannel = group.isPrivate || group.isPublic === false;
+    if (isPrivateChannel) {
+      const isMod = req.user.isAdmin ||
+        group.createdBy?.toString() === userIdStr ||
+        (Array.isArray(group.moderators) && group.moderators.some(m => m.toString() === userIdStr));
+      if (!isMod) {
+        return sendProblem(res, 403, 'Forbidden', 'Only moderators can invite members to private channels', 'NOT_MODERATOR');
+      }
+    }
+
+    const { userId } = req.body;
+    if (!userId) return sendProblem(res, 400, 'Bad Request', 'userId is required', 'MISSING_USER_ID');
+
+    if (!group.members.some(m => m.toString() === userId.toString())) {
+      group.members.push(userId);
+      await group.save();
+    }
+    const updated = await Group.findById(group._id).populate('members', 'displayName email avatar');
+    res.json(updated);
+  } catch (err) {
+    sendProblem(res, 500, 'Internal Server Error', err.message);
+  }
+});
+
+app.delete('/api/groups/:id/members/:userId', requireAuth, async (req, res) => {
+  try {
+    const group = await Group.findById(req.params.id);
+    if (!group) return sendProblem(res, 404, 'Not Found', 'Channel not found', 'CHANNEL_NOT_FOUND');
+
+    const currentUserIdStr = req.user._id.toString();
+    const targetUserIdStr = req.params.userId.toString();
+
+    const isSelf = currentUserIdStr === targetUserIdStr;
+    const isMod = req.user.isAdmin ||
+      group.createdBy?.toString() === currentUserIdStr ||
+      (Array.isArray(group.moderators) && group.moderators.some(m => m.toString() === currentUserIdStr));
+
+    if (!isSelf && !isMod) {
+      return sendProblem(res, 403, 'Forbidden', 'Insufficient permissions to remove member', 'NOT_AUTHORIZED');
+    }
+
+    group.members = group.members.filter(m => m.toString() !== targetUserIdStr);
+    group.moderators = group.moderators.filter(m => m.toString() !== targetUserIdStr);
+    await group.save();
+    res.json({ success: true, groupId: group._id, removedUserId: targetUserIdStr });
+  } catch (err) {
+    sendProblem(res, 500, 'Internal Server Error', err.message);
+  }
 });
 
 // ==========================================
@@ -871,6 +991,22 @@ io.on('connection', (socket) => {
 
   socket.on('send_message', async (data) => {
     const { from, to, content, fileUrl, voiceUrl, parentId } = data;
+
+    // Enforce private channel membership check if target is a channel
+    const destinationId = parentId ? (await Message.findById(parentId).select('to'))?.to : to;
+    if (destinationId) {
+      const destGroup = await Group.findById(destinationId).select('isPrivate isPublic members createdBy').catch(() => null);
+      if (destGroup && (destGroup.isPrivate || destGroup.isPublic === false)) {
+        const fromStr = from ? from.toString() : '';
+        const isMember = destGroup.createdBy?.toString() === fromStr ||
+          (Array.isArray(destGroup.members) && destGroup.members.some(m => m.toString() === fromStr));
+        if (!isMember) {
+          socket.emit('error_message', { message: 'You are not a member of this private channel.' });
+          return;
+        }
+      }
+    }
+
     if (parentId) {
       const parent = await Message.findById(parentId);
       if (parent) {

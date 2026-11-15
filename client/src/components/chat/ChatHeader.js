@@ -1,5 +1,5 @@
 import React from 'react';
-import { Phone, Video, Info, Hash, AtSign, Sparkles } from '../common/Icons';
+import { Phone, Video, Info, Hash, AtSign, Sparkles, Lock, Star } from '../common/Icons';
 
 export default function ChatHeader({
   activeTarget,
@@ -7,7 +7,9 @@ export default function ChatHeader({
   onStartAudioCall,
   onStartVideoCall,
   onToggleInspector,
-  inspectorOpen
+  inspectorOpen,
+  starredIds = [],
+  onToggleStar
 }) {
   if (!activeTarget) return null;
 
@@ -17,16 +19,39 @@ export default function ChatHeader({
 
   const targetUser = isUser ? activeTarget.user : null;
   const targetGroup = isGroup ? activeTarget.group : null;
+  const isPrivateGroup = isGroup && (targetGroup?.isPrivate || targetGroup?.isPublic === false);
   const isOnline = isUser ? Boolean(userStatus[targetUser?._id]) : true;
+  const isStarred = Boolean(activeTarget?.id && starredIds.includes(activeTarget.id));
 
   return (
     <header className="chat-header">
       <div className="chat-header-info">
         <div className="chat-header-title">
-          {isGroup && <Hash size={20} color="#00F0FF" />}
+          {isGroup && (
+            isPrivateGroup ? <Lock size={19} color="#F59E0B" /> : <Hash size={20} color="#00F0FF" />
+          )}
           {isUser && <AtSign size={19} color="#94A3B8" />}
           {isAladin && <Sparkles size={19} color="#8B5CF6" />}
           <span>{activeTarget.name}</span>
+
+          {onToggleStar && (
+            <button
+              className="chat-header-star-btn"
+              title={isStarred ? 'Unstar' : 'Star channel / conversation'}
+              onClick={() => onToggleStar(activeTarget.id)}
+              style={{
+                background: 'none',
+                border: 'none',
+                cursor: 'pointer',
+                padding: '2px 4px',
+                display: 'inline-flex',
+                alignItems: 'center',
+                color: isStarred ? '#F59E0B' : '#64748B'
+              }}
+            >
+              <Star size={15} color={isStarred ? '#F59E0B' : '#64748B'} fill={isStarred ? '#F59E0B' : 'none'} />
+            </button>
+          )}
         </div>
 
         <div className="chat-header-subtitle">
@@ -36,7 +61,17 @@ export default function ChatHeader({
             </span>
           )}
           {isGroup && (
-            <span>{targetGroup?.members?.length || 0} members</span>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <span>{targetGroup?.members?.length || 0} members</span>
+              {targetGroup?.topic && (
+                <>
+                  <span style={{ opacity: 0.4 }}>|</span>
+                  <span style={{ color: '#94A3B8', maxWidth: 380, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                    {targetGroup.topic}
+                  </span>
+                </>
+              )}
+            </div>
           )}
           {isAladin && (
             <span style={{ color: '#A78BFA' }}>Autonomous Copilot Active</span>

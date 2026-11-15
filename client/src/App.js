@@ -218,7 +218,9 @@ function Workspace({
   handleSendThreadReply,
   handleEditMessage,
   handleDeleteMessage,
-  handlePinMessage
+  handlePinMessage,
+  starredIds = [],
+  handleToggleStar
 }) {
   const navigate = useNavigate();
   const [activeView, setActiveView] = useState('chats');
@@ -273,6 +275,8 @@ function Workspace({
         onOpenCreateGroup={() => setCreateChannelOpen(true)}
         searchQuery={searchQuery}
         setSearchQuery={setSearchQuery}
+        starredIds={starredIds}
+        onToggleStar={handleToggleStar}
       />
 
       {/* 3. Main Center Stage (ChatCanvas) */}
@@ -285,6 +289,8 @@ function Workspace({
             onStartVideoCall={userId => startCall(userId, true)}
             onToggleInspector={() => setInspectorOpen(v => !v)}
             inspectorOpen={inspectorOpen}
+            starredIds={starredIds}
+            onToggleStar={handleToggleStar}
           />
         )}
 
@@ -401,6 +407,26 @@ function App() {
   const [activeTarget, setActiveTarget] = useState(null); // { type, id, name }
   const [activeThread, setActiveThread] = useState(null); // Parent message object for open thread
   const [pinnedMessages, setPinnedMessages] = useState([]);
+  const [starredIds, setStarredIds] = useState(() => {
+    try {
+      const saved = localStorage.getItem('kuchoo_starred_ids');
+      return saved ? JSON.parse(saved) : [];
+    } catch (e) {
+      return [];
+    }
+  });
+
+  const handleToggleStar = (targetId) => {
+    if (!targetId) return;
+    setStarredIds(prev => {
+      const next = prev.includes(targetId) ? prev.filter(id => id !== targetId) : [...prev, targetId];
+      try {
+        localStorage.setItem('kuchoo_starred_ids', JSON.stringify(next));
+      } catch (e) {}
+      return next;
+    });
+  };
+
   const [content, setContent] = useState('');
   const [authMode, setAuthMode] = useState('login'); // 'login' | 'signup'
   const [loginForm, setLoginForm] = useState({ email: '', password: '' });
@@ -703,12 +729,12 @@ function App() {
     setUser(data);
   };
 
-  const handleCreateGroup = async ({ name, members }) => {
+  const handleCreateGroup = async ({ name, members, topic, description, isPrivate }) => {
     const res = await fetch(`${BACKEND_URL}/api/groups`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       credentials: 'include',
-      body: JSON.stringify({ name, members })
+      body: JSON.stringify({ name, members, topic, description, isPrivate })
     });
     const newGroup = await res.json();
     setGroups(prev => [...prev, newGroup]);
@@ -896,6 +922,8 @@ function App() {
                 handleEditMessage={handleEditMessage}
                 handleDeleteMessage={handleDeleteMessage}
                 handlePinMessage={handlePinMessage}
+                starredIds={starredIds}
+                handleToggleStar={handleToggleStar}
               />
             )
           }
